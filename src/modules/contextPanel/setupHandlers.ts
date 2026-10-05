@@ -109,9 +109,6 @@ import {
   clearWebChatConversationForceNewChat,
   consumeWebChatConversationForceNewChat,
   currentRequestId,
-  activeConversationModeByLibrary,
-  activeGlobalConversationByLibrary,
-  activePaperConversationByPaper,
   draftInputCache,
   webChatDraftInputCache,
   activeContextPanels,
@@ -167,14 +164,17 @@ import {
   setLastUsedReasoningLevel,
   setLastUsedReasoningLevelForProvider,
   setLastUsedRuntimeMode,
-  setLastUsedUpstreamConversationMode,
-  setLastUsedUpstreamGlobalConversationKey,
   getLastUsedPaperConversationKey,
   removeLastUsedPaperConversationKey,
   getLockedGlobalConversationKey,
   setLockedGlobalConversationKey,
-  buildPaperStateKey,
 } from "./prefHelpers";
+import {
+  recall,
+  recallActive,
+  remember,
+  rememberMode,
+} from "./conversationSelection";
 import { refreshConfiguredProviderModelCatalogs } from "../../utils/modelProviders";
 import {
   refreshModelCapabilityRegistry,
@@ -414,6 +414,12 @@ import {
   positionFloatingMenu,
   setFloatingMenuOpen,
 } from "./setupHandlers/controllers/menuController";
+import {
+  MENUS_CLOSED_BY_MODEL_MENU,
+  MENUS_CLOSED_BY_REASONING_MENU,
+  MENUS_CLOSED_BY_RETRY_MODEL_MENU,
+  createMenuRegistry,
+} from "./setupHandlers/controllers/menuRegistry";
 import { createActionLayoutController } from "./setupHandlers/controllers/actionLayoutController";
 import {
   getReasoningLevelDisplayLabel,
@@ -461,10 +467,6 @@ import {
   prunePinnedImageKeys,
   removePinnedFile,
   removePinnedImage,
-  removePinnedSelectedText,
-  togglePinnedFile,
-  togglePinnedImage,
-  togglePinnedSelectedText,
 } from "./setupHandlers/controllers/pinnedContextController";
 import {
   createFileIntakeController,
@@ -546,7 +548,6 @@ import {
   removeLastUsedClaudePaperConversationKey,
   setClaudeReasoningModePref,
   setClaudeRuntimeModelPref,
-  setLastUsedClaudeConversationMode,
 } from "../../claudeCode/prefs";
 import {
   buildClaudeRuntimeModelEntries,
@@ -557,13 +558,10 @@ import {
   getCodexReasoningModePref,
   getCodexRuntimeModelPref,
   getLastUsedCodexConversationMode,
-  getLastUsedCodexGlobalConversationKey,
   getLastUsedCodexPaperConversationKey,
   isCodexAppServerModeEnabled,
   removeLastUsedCodexGlobalConversationKey,
   removeLastUsedCodexPaperConversationKey,
-  setLastUsedCodexGlobalConversationKey,
-  setLastUsedCodexConversationMode,
   setCodexReasoningModePref,
   setCodexRuntimeModelPref,
 } from "../../codexAppServer/prefs";
@@ -577,19 +575,10 @@ import {
   type CodexAppServerModelCatalogEntry,
 } from "../../codexAppServer/modelCatalog";
 import {
-  activeClaudeConversationModeByLibrary,
   activeClaudeGlobalConversationByLibrary,
   activeClaudePaperConversationByPaper,
-  buildClaudeLibraryStateKey,
   buildClaudePaperStateKey,
 } from "../../claudeCode/state";
-import {
-  activeCodexConversationModeByLibrary,
-  activeCodexGlobalConversationByLibrary,
-  activeCodexPaperConversationByPaper,
-  buildCodexLibraryStateKey,
-  buildCodexPaperStateKey,
-} from "../../codexAppServer/state";
 import {
   retainClaudeRuntimeForBody,
   releaseClaudeRuntimeForBody,
@@ -711,8 +700,6 @@ export function setupHandlers(
   let basePaperItem =
     resolvedInitialState.basePaperItem ||
     resolveConversationBaseItem(rawPanelItem);
-  const buildPaperStateKey = (libraryID: number, paperItemID: number): string =>
-    `${Math.floor(libraryID)}:${Math.floor(paperItemID)}`;
   const resolveLibraryIdFromItem = (
     targetItem: Zotero.Item | null | undefined,
   ): number => {
@@ -1579,17 +1566,16 @@ export function setupHandlers(
             getLastUsedClaudeGlobalConversationKey(libraryID) ||
             0
           : nextSystem === "codex"
-            ? activeCodexGlobalConversationByLibrary.get(
-                buildCodexLibraryStateKey(libraryID),
-              ) ||
-              getLastUsedCodexGlobalConversationKey(libraryID) ||
-              0
+            ? recall({ system: "codex", libraryID, kind: "global" })
             : (() => {
                 const lockedKey = getLockedGlobalConversationKey(libraryID);
                 if (lockedKey !== null) return lockedKey;
-                const activeKey = Number(
-                  activeGlobalConversationByLibrary.get(libraryID) || 0,
-                );
+                // Upstream reads the active map only here, not the pref.
+                const activeKey = recallActive({
+                  system: "upstream",
+                  libraryID,
+                  kind: "global",
+                });
                 if (!isUpstreamGlobalConversationKey(activeKey)) return 0;
                 return activeKey === GLOBAL_CONVERSATION_KEY_BASE
                   ? buildDefaultUpstreamGlobalConversationKey(libraryID)
@@ -1847,48 +1833,36 @@ export function setupHandlers(
       historyToggleBtn.style.display = "";
     }
     if (item && libraryID > 0 && mode && !noteSession) {
+      // Each runtime writes a different set here: Claude Code only the mode;
+      // Codex and upstream also the library chat (map and pref) and the
+      // paper chat (map only).
       if (isClaudeConversationSystem()) {
-        activeClaudeConversationModeByLibrary.set(
-          buildClaudeLibraryStateKey(libraryID),
-          mode,
-        );
-        setLastUsedClaudeConversationMode(libraryID, mode);
+        rememberMode("claude_code", libraryID, mode);
       } else if (isCodexConversationSystem()) {
-        activeCodexConversationModeByLibrary.set(
-          buildCodexLibraryStateKey(libraryID),
-          mode,
-        );
-        setLastUsedCodexConversationMode(libraryID, mode);
+        rememberMode("codex", libraryID, mode);
         if (mode === "global") {
-          activeCodexGlobalConversationByLibrary.set(
-            buildCodexLibraryStateKey(libraryID),
-            item.id,
-          );
-          setLastUsedCodexGlobalConversationKey(libraryID, item.id);
+          remember({ system: "codex", libraryID, kind: "global" }, item.id);
         } else if (
           Number.isFinite(conversationKey) &&
           (conversationKey as number) > 0 &&
           Number.isFinite(currentBasePaperItemID) &&
           currentBasePaperItemID > 0
         ) {
-          const normalizedConversationKey = Math.floor(
-            conversationKey as number,
-          );
-          const paperStateKey = buildCodexPaperStateKey(
-            libraryID,
-            Math.floor(currentBasePaperItemID),
-          );
-          activeCodexPaperConversationByPaper.set(
-            paperStateKey,
-            normalizedConversationKey,
+          remember(
+            {
+              system: "codex",
+              libraryID,
+              kind: "paper",
+              paperItemID: Math.floor(currentBasePaperItemID),
+            },
+            Math.floor(conversationKey as number),
+            { persist: false },
           );
         }
       } else {
-        activeConversationModeByLibrary.set(libraryID, mode);
-        setLastUsedUpstreamConversationMode(libraryID, mode);
+        rememberMode("upstream", libraryID, mode);
         if (mode === "global") {
-          activeGlobalConversationByLibrary.set(libraryID, item.id);
-          setLastUsedUpstreamGlobalConversationKey(libraryID, item.id);
+          remember({ system: "upstream", libraryID, kind: "global" }, item.id);
         } else if (
           Number.isFinite(conversationKey) &&
           (conversationKey as number) > 0 &&
@@ -1900,16 +1874,15 @@ export function setupHandlers(
             setLockedGlobalConversationKey(libraryID, null);
             removeAutoLockedGlobalConversationKey(lockedGlobalKey);
           }
-          const normalizedConversationKey = Math.floor(
-            conversationKey as number,
-          );
-          const paperStateKey = buildPaperStateKey(
-            libraryID,
-            Math.floor(currentBasePaperItemID),
-          );
-          activePaperConversationByPaper.set(
-            paperStateKey,
-            normalizedConversationKey,
+          remember(
+            {
+              system: "upstream",
+              libraryID,
+              kind: "paper",
+              paperItemID: Math.floor(currentBasePaperItemID),
+            },
+            Math.floor(conversationKey as number),
+            { persist: false },
           );
         }
       }
@@ -2163,6 +2136,7 @@ export function setupHandlers(
   // scroll changes.
 
   let retryMenuAnchor: HTMLButtonElement | null = null;
+  const menus = createMenuRegistry();
   const closeResponseMenu = () => {
     if (responseMenu) responseMenu.style.display = "none";
     setResponseMenuTarget(null);
@@ -2231,6 +2205,16 @@ export function setupHandlers(
     setFloatingMenuOpen(retryModelMenu, RETRY_MODEL_MENU_OPEN_CLASS, false);
     retryMenuAnchor = null;
   };
+  menus.register("response", closeResponseMenu);
+  menus.register("prompt", closePromptMenu);
+  menus.register("export", closeExportMenu);
+  menus.register("historyRow", closeHistoryRowMenu);
+  menus.register("historyNew", closeHistoryNewMenu, isHistoryNewMenuOpen);
+  menus.register("history", closeHistoryMenu, isHistoryMenuOpen);
+  menus.register("slash", closeSlashMenu);
+  menus.register("model", closeModelMenu);
+  menus.register("reasoning", closeReasoningMenu);
+  menus.register("retryModel", closeRetryModelMenu);
 
   const handlerContext: SetupHandlersContext = {
     body,
@@ -6900,6 +6884,7 @@ export function setupHandlers(
     consumeActiveActionToken,
   } = actionCommandController;
   closeSlashMenu = closeActionSlashMenu;
+  menus.register("slash", closeSlashMenu);
   clearForcedSkill = clearForcedSkillFromActionController;
 
   if (inputSection && inputBox) {
@@ -7885,12 +7870,7 @@ export function setupHandlers(
   openModelMenu = () => {
     if (!modelMenu || !modelBtn) return;
     if ((modelBtn as HTMLButtonElement).disabled) return;
-    closeSlashMenu();
-    closeRetryModelMenu();
-    closeReasoningMenu();
-    closePromptMenu();
-    closeHistoryNewMenu();
-    closeHistoryMenu();
+    menus.closeMany(MENUS_CLOSED_BY_MODEL_MENU);
     if (isCodexConversationSystem()) {
       void ensureCodexModelCatalogLoaded();
     } else if (isClaudeConversationSystem()) {
@@ -7917,15 +7897,11 @@ export function setupHandlers(
   closeModelMenu = () => {
     setFloatingMenuOpen(modelMenu, MODEL_MENU_OPEN_CLASS, false);
   };
+  menus.register("model", closeModelMenu);
 
   openReasoningMenu = () => {
     if (!reasoningMenu || !reasoningBtn) return;
-    closeSlashMenu();
-    closeRetryModelMenu();
-    closeModelMenu();
-    closePromptMenu();
-    closeHistoryNewMenu();
-    closeHistoryMenu();
+    menus.closeMany(MENUS_CLOSED_BY_REASONING_MENU);
     if (isCodexConversationSystem()) {
       void ensureCodexModelCatalogLoaded();
     } else if (codexDirectController?.getSelectedEntry()) {
@@ -7945,17 +7921,11 @@ export function setupHandlers(
   closeReasoningMenu = () => {
     setFloatingMenuOpen(reasoningMenu, REASONING_MENU_OPEN_CLASS, false);
   };
+  menus.register("reasoning", closeReasoningMenu);
 
   const openRetryModelMenu = (anchor: HTMLButtonElement) => {
     if (!item || !retryModelMenu) return;
-    closeSlashMenu();
-    closeResponseMenu();
-    closeExportMenu();
-    closePromptMenu();
-    closeHistoryNewMenu();
-    closeHistoryMenu();
-    closeModelMenu();
-    closeReasoningMenu();
+    menus.closeMany(MENUS_CLOSED_BY_RETRY_MODEL_MENU);
     rebuildRetryModelMenu();
     if (!retryModelMenu.childElementCount) {
       closeRetryModelMenu();
