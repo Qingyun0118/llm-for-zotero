@@ -1,6 +1,7 @@
 import { appLogger } from "../../core/logging";
 import { copyNoteEditingSelectedTextContext } from "./noteEditing/selectionController";
 import {
+  bindTaskProgressToggle,
   disposeTaskProgressPanel,
   syncTaskProgressPanel,
 } from "./taskProgress/panel";
@@ -826,6 +827,15 @@ export function setupHandlers(
   const panelLifecycle = new PanelLifecycle();
 
   const isStandalonePanel = panelRoot.dataset.standalone === "true";
+  // The header's Task progress button. The standalone window binds its own
+  // title-bar button to this body, so its hidden header button stays unbound.
+  const taskProgressToggleBtn = body.querySelector(
+    "#llm-task-progress-toggle",
+  ) as HTMLButtonElement | null;
+  const unbindTaskProgressToggle =
+    taskProgressToggleBtn && !isStandalonePanel
+      ? bindTaskProgressToggle(body, taskProgressToggleBtn)
+      : null;
   const chatShell = body.querySelector(
     "#llm-chat-shell",
   ) as HTMLDivElement | null;
@@ -8218,6 +8228,8 @@ export function setupHandlers(
     cleanupModelCapabilitySubscription?.();
     cleanupModelCapabilitySubscription = null;
     disposeHistoryActivity?.();
+    // Before the panel's teardown, which would repaint the button.
+    unbindTaskProgressToggle?.();
     disposeTaskProgressPanel(body);
     disposeConversationTurnNavigator(body);
     disposeChatRendering(body);

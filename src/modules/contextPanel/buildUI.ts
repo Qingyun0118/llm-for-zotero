@@ -31,6 +31,7 @@ import {
 import { createSidebarModeSwitch } from "./sidebarModeSwitch";
 import { buildContextUsagePresentation } from "./textUtils";
 import { createChatLatestButton } from "./chatLatestButton";
+import { createTaskProgressToggleButton } from "./taskProgress/toggleButton";
 import { createTaskProgressCurtain } from "./taskProgress/view";
 
 function createActionDropdown(doc: Document, spec: ActionDropdownSpec) {
@@ -276,6 +277,13 @@ function buildUI(body: Element, item?: Zotero.Item | null) {
   headerNavRow.appendChild(headerInfo);
 
   const headerActions = createElement(doc, "div", "llm-header-actions");
+  // Shows or hides the Task progress row; setupHandlers binds it, except in
+  // the standalone window, which hides this header and has its own button.
+  const taskProgressBtn = createTaskProgressToggleButton(
+    doc,
+    "llm-btn-icon llm-task-progress-btn",
+  );
+  taskProgressBtn.id = "llm-task-progress-toggle";
   const popoutBtn = createElement(
     doc,
     "button",
@@ -317,7 +325,13 @@ function buildUI(body: Element, item?: Zotero.Item | null) {
     title: t("Delete conversation"),
   });
   clearBtn.setAttribute("aria-label", t("Delete conversation"));
-  headerActions.append(popoutBtn, settingsBtn, exportBtn, clearBtn);
+  headerActions.append(
+    taskProgressBtn,
+    popoutBtn,
+    settingsBtn,
+    exportBtn,
+    clearBtn,
+  );
   headerNavRow.appendChild(headerActions);
   headerTop.append(toggleRow, headerNavRow);
   if (body.closest(".llm-dedicated-chat-pane")) {
