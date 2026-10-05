@@ -1,6 +1,6 @@
 import { fnv1a32Raw } from "../utils/fnv1a";
 import { appLogger } from "../core/logging";
-import { evaluatePreparedActionContract } from "./contracts/actionEvaluation";
+import { settleExternalTurn } from "./execution/externalTurnSettlement";
 import { config } from "../../package.json";
 import {
   MAX_FULL_TEXT_PAPER_CONTEXTS,
@@ -111,6 +111,8 @@ export type RunTurnParams = {
   request: AgentRuntimeRequestInput;
   onEvent?: (event: AgentEvent) => void | Promise<void>;
   onStart?: (runId: string) => void | Promise<void>;
+  /** As for the in-plugin runtime; a bridge turn never waits, so never called. */
+  onWaiting?: (text: string) => void | Promise<void>;
   signal?: AbortSignal;
 };
 
@@ -209,10 +211,20 @@ export type AgentRuntimeLike = Pick<
   ): Promise<ActionResult<unknown>>;
 };
 
+/**
+ * What the bridge server streams as a turn's outcome: Claude answered or
+ * fell back. A stop or a failure arrives as an error line instead, and the
+ * bridge runtime turns it into a cancelled or failed outcome.
+ */
+type BridgeTurnOutcome = Extract<
+  AgentRuntimeOutcome,
+  { kind: "completed" | "fallback" }
+>;
+
 type BridgeLine =
   | { type: "start"; runId: string }
   | { type: "event"; event: AgentEvent }
-  | { type: "outcome"; outcome: AgentRuntimeOutcome }
+  | { type: "outcome"; outcome: BridgeTurnOutcome }
   | { type: "error"; error: string };
 
 function makeProfilingEvent(
@@ -1039,7 +1051,7 @@ async function runExternalBridgeTurn(
     ) => void;
     resolveExternalConfirmation?: ResolveExternalConfirmation;
   },
-): Promise<AgentRuntimeOutcome> {
+): Promise<BridgeTurnOutcome> {
   const url = `${normalizeBaseUrl(baseUrl)}/run-turn`;
   const reasoningLevel =
     typeof params.request.reasoning?.level === "string"
@@ -1128,7 +1140,7 @@ async function runExternalBridgeTurn(
     throw new Error(`Bridge HTTP ${response.status}`);
   }
 
-  let finalOutcome: AgentRuntimeOutcome | null = null;
+  let finalOutcome: BridgeTurnOutcome | null = null;
   let sawFirstBridgeLine = false;
 
   await streamBridgeLines(response, async (line) => {
@@ -2302,7 +2314,7 @@ async function runExternalBridgeAction(
     onStart?: (runId: string) => void | Promise<void>;
     metadata?: Record<string, unknown>;
   },
-): Promise<AgentRuntimeOutcome> {
+): Promise<BridgeTurnOutcome> {
   const response = await fetch(`${normalizeBaseUrl(baseUrl)}/run-action`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -2331,7 +2343,7 @@ async function runExternalBridgeAction(
   if (!response.ok) {
     throw new Error(`Bridge HTTP ${response.status}`);
   }
-  let finalOutcome: AgentRuntimeOutcome | null = null;
+  let finalOutcome: BridgeTurnOutcome | null = null;
   await streamBridgeLines(response, async (line) => {
     if (line.type === "start") {
       await params.onStart?.(line.runId);
@@ -3345,7 +3357,7 @@ export function createExternalBackendBridgeRuntime(options: {
           const runBridge = async (
             request: AgentRuntimeRequest,
             bridgeRuntimeRequest: BridgeRuntimeRequest,
-          ): Promise<AgentRuntimeOutcome> =>
+          ): Promise<BridgeTurnOutcome> =>
             runExternalBridgeTurn(bridgeUrl, {
               ...params,
               request,
@@ -3371,44 +3383,40 @@ export function createExternalBackendBridgeRuntime(options: {
 
           let outcome = await runBridge(params.request, runtimeRequest);
           await Promise.all(pendingMcpActivity);
-          let terminalRunStatus: "completed" | "failed" =
-            outcome.kind === "completed" ? "completed" : "failed";
-          let finalizedDocument = null;
-          if (outcome.kind === "completed") {
-            finalizedDocument = await loadFinalizedDocument();
-          }
-          if (outcome.kind === "completed") {
-            const document = finalizedDocument;
-            if (document) {
-              outcome = {
-                ...outcome,
-                text: document.visibleMarkdown,
-                documentId: document.documentId,
-              };
-            }
-          }
-          const actionEvaluation = evaluatePreparedActionContract(hostReceipts);
-          if (
-            actionEvaluation.state !== "satisfied" &&
-            actionEvaluation.state !== "cancelled"
-          ) {
-            terminalRunStatus = "failed";
-            const failure =
-              actionEvaluation.failure ||
-              "The requested action has no verified completion evidence.";
+          // Only an answered turn has a finalized document, and the bridge
+          // keys it by the persisted run.
+          const finalizedDocument =
+            outcome.kind === "completed" ? await loadFinalizedDocument() : null;
+          const settlement = settleExternalTurn({
+            answerText:
+              outcome.kind === "completed" ? outcome.text : outcome.reason,
+            answered: outcome.kind === "completed",
+            document: finalizedDocument,
+            hostReceipts,
+          });
+          const terminalRunStatus = settlement.status;
+          if (settlement.unverified !== undefined) {
             await emitTurnEvent({
               type: "provider_event",
               providerType: "agent_completion_unverified",
-              payload: { reason: failure },
+              payload: { reason: settlement.unverified },
             });
+            // The report replaces the outcome, a fallback included.
             outcome = {
               kind: "completed",
               runId: outcome.runId,
-              text: finalizedDocument
-                ? `${finalizedDocument.visibleMarkdown}\n\n${failure}`
-                : failure,
-              documentId: finalizedDocument?.documentId,
+              text: settlement.text,
+              documentId: settlement.documentId,
               usedFallback: false,
+              ...(terminalRunStatus === "failed"
+                ? { runStatus: "failed" as const }
+                : {}),
+            };
+          } else if (outcome.kind === "completed" && finalizedDocument) {
+            outcome = {
+              ...outcome,
+              text: settlement.text,
+              documentId: settlement.documentId,
             };
           }
 
@@ -3416,7 +3424,7 @@ export function createExternalBackendBridgeRuntime(options: {
             await appendPersistedEvent(redactedEvent);
             await notifyIfLive(redactedEvent);
           }
-          const safeOutcome: AgentRuntimeOutcome =
+          const safeOutcome: BridgeTurnOutcome =
             outcome.kind === "completed"
               ? {
                   ...outcome,
@@ -3491,7 +3499,17 @@ export function createExternalBackendBridgeRuntime(options: {
             finishAgentRun(fallbackRunId, failedRunStatus, message),
           );
           appLogger.warn("LLM Agent: External bridge unavailable", message);
-          throw new Error(message);
+          // The throwing public runTurn rethrows the report as it always has.
+          const cause = new Error(message);
+          return failedRunStatus === "cancelled"
+            ? { kind: "cancelled", runId: fallbackRunId, cause }
+            : {
+                kind: "failed",
+                runId: fallbackRunId,
+                message,
+                interrupted: false,
+                cause,
+              };
         } finally {
           unregisterMcpToolActivity();
           clearScopedMcpScope();

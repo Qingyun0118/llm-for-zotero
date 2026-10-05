@@ -20,12 +20,15 @@ import {
  */
 import type { AgentRuntime } from "../../../agent/runtime";
 import { ExecutionCheckpointFold } from "../../../agent/execution/checkpointEvents";
+import { unansweredTurnError } from "../../../agent/execution/unansweredTurn";
+import { taskProgressEffect } from "../taskProgress/runFold";
 import type {
   AgentEvent,
   AgentPendingAction,
   AgentRunEventRecord,
   AgentRuntimeOutcome,
   AgentRuntimeRequestInput as AgentRuntimeRequest,
+  AgentRuntimeUnansweredOutcome,
 } from "../../../agent/types";
 import { consumePendingRetentionEvents } from "../../../claudeCode/runtimeRetention";
 import {
@@ -326,6 +329,52 @@ export function createAgentTurnEventHandler(
       text: pairedUserMessage.text,
     });
   };
+  // What the event does to Task progress, read by the one fold the rebuild
+  // of a stored conversation shares, applied here as the event arrives.
+  const applyTaskProgress = (event: AgentEvent): void => {
+    const effect = taskProgressEffect(event);
+    if (!effect) return;
+    const runId = assistantMessage.agentRunId;
+    switch (effect.kind) {
+      case "paper_delta":
+        applyTaskPaperUpdate(conversationKey, effect.delta, runId);
+        return;
+      case "document_citations":
+        // The papers a submitted document cites, under their sections.
+        if (effect.citations?.length) {
+          applyTaskDocumentCitations(conversationKey, runId, effect.citations);
+        }
+        return;
+      case "outcomes": {
+        // The run's outcomes, as its ledger stands, are its Task progress steps.
+        const checkpoint = outcomeLedger.apply(effect.event);
+        if (runId && checkpoint) {
+          setTaskOutcomes(conversationKey, runId, checkpoint);
+        }
+        return;
+      }
+      case "answering":
+        markTaskAnswering(conversationKey, runId);
+        return;
+      case "waiting":
+        markTaskWaiting(conversationKey, runId, effect.waiting);
+        return;
+      case "final":
+        completeTaskRun(conversationKey, {
+          runId,
+          quoteCitations: selectUsedQuoteCitations({
+            text: assistantMessage.text,
+            quoteCitations: assistantMessage.quoteCitations,
+          }),
+          libraryID: runtimeRequest.libraryID,
+        });
+        return;
+      default:
+        // A Codex plan or a retired plan event never reaches this engine's
+        // Task progress: native Codex turns are wired in the chat panel.
+        return;
+    }
+  };
   return async (event: AgentEvent): Promise<void> => {
     ensureTaskRun();
     if (assistantMessage.agentRunId) {
@@ -464,6 +513,8 @@ export function createAgentTurnEventHandler(
       }
       case "status": {
         const isCompactingStatus = /compacting context/i.test(event.text);
+        // A status can come before the run starts: the wait for a stopped
+        // run, and the Claude bridge adapter's session-resume retry notice.
         if (
           !isCompactingStatus &&
           !assistantMessage.agentRunId &&
@@ -511,7 +562,7 @@ export function createAgentTurnEventHandler(
         break;
       case "confirmation_required":
         // The run waits on the user's decision until the card resolves.
-        markTaskWaiting(conversationKey, assistantMessage.agentRunId, true);
+        applyTaskProgress(event);
         showInlineConfirmationCard(body, ui, event.requestId, event.action);
         queueRefresh();
         body.ownerDocument?.defaultView?.setTimeout(() => {
@@ -520,7 +571,7 @@ export function createAgentTurnEventHandler(
         setStatusSafely("Approval required", "sending");
         return;
       case "confirmation_resolved":
-        markTaskWaiting(conversationKey, assistantMessage.agentRunId, false);
+        applyTaskProgress(event);
         closeInlineConfirmationCard(body, ui, event.requestId);
         queueRefresh();
         setStatusSafely(
@@ -531,42 +582,22 @@ export function createAgentTurnEventHandler(
       case "message_delta": {
         // The answer is streaming: the row says so and an open overlay
         // collapses, back to the chat the answer arrives in.
-        markTaskAnswering(conversationKey, assistantMessage.agentRunId);
+        applyTaskProgress(event);
         messageDeltaCoalescer.pushText(deps.sanitizeText(event.text));
         return;
       }
       case "paper_ledger_update":
-        applyTaskPaperUpdate(
-          conversationKey,
-          event.delta,
-          assistantMessage.agentRunId,
-        );
+        applyTaskProgress(event);
         return;
       case "material_finalized":
-        // The papers a submitted document cites, under their sections.
-        if (event.citedSources?.length) {
-          applyTaskDocumentCitations(
-            conversationKey,
-            assistantMessage.agentRunId,
-            event.citedSources,
-          );
-        }
+        applyTaskProgress(event);
         // As before: the assistant refreshes after the event (the store
         // repaints the Task progress view on its own).
         break;
       case "execution_checkpoint":
-      case "execution_checkpoint_delta": {
-        // The run's outcomes, as its ledger stands, are its Task progress steps.
-        const checkpoint = outcomeLedger.apply(event);
-        if (assistantMessage.agentRunId && checkpoint) {
-          setTaskOutcomes(
-            conversationKey,
-            assistantMessage.agentRunId,
-            checkpoint,
-          );
-        }
+      case "execution_checkpoint_delta":
+        applyTaskProgress(event);
         break;
-      }
       case "message_rollback":
         if (typeof event.length === "number" && event.length > 0) {
           assistantMessage.pendingFinalText = (
@@ -638,14 +669,7 @@ export function createAgentTurnEventHandler(
         assistantMessage.pendingFinalText = assistantMessage.text;
         assistantMessage.waitingAnimationStartedAt = undefined;
         assistantMessage.streaming = false;
-        completeTaskRun(conversationKey, {
-          runId: assistantMessage.agentRunId,
-          quoteCitations: selectUsedQuoteCitations({
-            text: assistantMessage.text,
-            quoteCitations: assistantMessage.quoteCitations,
-          }),
-          libraryID: runtimeRequest.libraryID,
-        });
+        applyTaskProgress(event);
         break;
       default:
         break;
@@ -653,6 +677,100 @@ export function createAgentTurnEventHandler(
     ctx.refreshAssistant();
     await deps.waitForUiStep();
   };
+}
+
+/**
+ * The callbacks a turn's run reports through, shared by send and retry. At
+ * its start the run is bound to the assistant and the paired user message,
+ * its Task progress row begins, and its trace opens; its events are handled
+ * by {@link createAgentTurnEventHandler}. The wait for a stopped run, before
+ * the run starts, shows as the run's status did.
+ */
+function startAgentTurnRun(
+  ctx: Omit<AgentTurnEventContext, "pushTraceEvent">,
+): {
+  onStart: (runId: string) => Promise<void>;
+  onEvent: (event: AgentEvent) => Promise<void>;
+  onWaiting: (text: string) => Promise<void>;
+} {
+  const {
+    deps,
+    conversationKey,
+    assistantMessage,
+    pairedUserMessage,
+    history,
+    isCompactCommand,
+    refreshChatSafely,
+  } = ctx;
+  const pushTraceEvent = (runId: string, event: AgentEvent) => {
+    const list = deps.agentRunTraceCache.get(runId) || [];
+    list.push({
+      runId,
+      seq: list.length + 1,
+      eventType: event.type,
+      payload: event,
+      createdAt: Date.now(),
+    });
+    deps.agentRunTraceCache.set(runId, list);
+  };
+  const onEvent = createAgentTurnEventHandler({ ...ctx, pushTraceEvent });
+  return {
+    onStart: async (runId) => {
+      assistantMessage.agentRunId = runId;
+      pairedUserMessage.agentRunId = runId;
+      beginTaskRun(conversationKey, {
+        runId,
+        turnIndex: taskTurnIndexFor(history, pairedUserMessage) || undefined,
+        text: pairedUserMessage.text,
+      });
+      deps.agentRunTraceCache.set(runId, []);
+      refreshChatSafely();
+      if (!isCompactCommand) {
+        await deps.updateStoredLatestUserMessage(
+          conversationKey,
+          buildStoredUserMessagePatch(pairedUserMessage),
+        );
+      }
+    },
+    onEvent,
+    onWaiting: (text) => onEvent({ type: "status", text }),
+  };
+}
+
+/**
+ * How a turn ends once its run has: an answered or fallback outcome is
+ * finalized; a cancelled one ends as the user's Stop; a failed one, or a
+ * thrown error, ends as a failure. Shared by send and retry.
+ *
+ * What the cancelled or failed ending throws is not a second failure: it
+ * leaves the turn, as it did when the run threw instead of returning.
+ */
+async function settleAgentTurn(ctx: {
+  run: () => Promise<AgentRuntimeOutcome>;
+  finalize: (
+    outcome: Exclude<AgentRuntimeOutcome, AgentRuntimeUnansweredOutcome>,
+  ) => Promise<void>;
+  reasoningRefreshes: Pick<ReasoningRefreshCoalescer, "flushNow">;
+  markCancelled: () => Promise<void>;
+  failTurn: (err: unknown) => Promise<void>;
+}): Promise<void> {
+  let unanswered: AgentRuntimeUnansweredOutcome | undefined;
+  try {
+    const outcome = await ctx.run();
+    if (outcome.kind === "cancelled" || outcome.kind === "failed") {
+      unanswered = outcome;
+    } else {
+      // A run can end without a final event; nothing it streamed may
+      // repaint after the outcome below finalizes the message.
+      ctx.reasoningRefreshes.flushNow();
+      await ctx.finalize(outcome);
+    }
+  } catch (err) {
+    await ctx.failTurn(err);
+    return;
+  }
+  if (unanswered?.kind === "cancelled") await ctx.markCancelled();
+  else if (unanswered) await ctx.failTurn(unansweredTurnError(unanswered));
 }
 
 /**
@@ -665,7 +783,7 @@ async function finalizeAgentTurnOutcome(ctx: {
   item: Zotero.Item;
   conversationKey: number;
   thisRequestId: number;
-  outcome: AgentRuntimeOutcome;
+  outcome: Exclude<AgentRuntimeOutcome, AgentRuntimeUnansweredOutcome>;
   assistantMessage: Message;
   pairedUserMessage: Message;
   runtimeRequest: AgentRuntimeRequest;
@@ -1826,6 +1944,10 @@ export async function sendAgentTurn(
     const fallback = await agentRuntime.runTurn({
       request: runtimeRequest,
     });
+    // The probe has no Stop and no turn of its own to end: a run it could not
+    // finish leaves the send as a thrown error, as it always has.
+    if (fallback.kind === "cancelled" || fallback.kind === "failed")
+      throw unansweredTurnError(fallback);
     if (fallback.kind === "fallback") {
       historyForRun.pop();
       await deps.sendChatFallback({
@@ -1908,98 +2030,72 @@ export async function sendAgentTurn(
   };
 
   try {
-    const pushTraceEvent = (runId: string, event: AgentEvent) => {
-      const list = deps.agentRunTraceCache.get(runId) || [];
-      list.push({
-        runId,
-        seq: list.length + 1,
-        eventType: event.type,
-        payload: event,
-        createdAt: Date.now(),
-      });
-      deps.agentRunTraceCache.set(runId, list);
-    };
     let compactEventHandled = false;
-
-    if (ui.inputBox) ui.inputBox.disabled = false;
-    opts.onProviderDispatch?.();
-    const outcome = await agentRuntime.runTurn({
-      request: runtimeRequest,
-      signal: deps.currentAbortController(conversationKey)?.signal,
-      onStart: async (runId) => {
-        assistantMessage.agentRunId = runId;
-        userMessage.agentRunId = runId;
-        beginTaskRun(conversationKey, {
-          runId,
-          turnIndex: taskTurnIndexFor(historyForRun, userMessage) || undefined,
-          text: userMessage.text,
-        });
-        deps.agentRunTraceCache.set(runId, []);
-        refreshChatSafely();
-        if (!isCompactCommand) {
-          await deps.updateStoredLatestUserMessage(
+    await settleAgentTurn({
+      run: () => {
+        if (ui.inputBox) ui.inputBox.disabled = false;
+        opts.onProviderDispatch?.();
+        return agentRuntime.runTurn({
+          request: runtimeRequest,
+          signal: deps.currentAbortController(conversationKey)?.signal,
+          ...startAgentTurnRun({
+            deps,
+            body,
+            ui,
             conversationKey,
-            buildStoredUserMessagePatch(userMessage),
-          );
-        }
+            runtimeRequest,
+            assistantMessage,
+            pairedUserMessage: userMessage,
+            history: historyForRun,
+            isCompactCommand,
+            compactStyle: "replace-assistant",
+            onContextCompacted: () => {
+              compactEventHandled = true;
+            },
+            messageDeltaCoalescer,
+            flushMessageDeltas,
+            reasoningRefreshes,
+            queueRefresh,
+            refreshAssistant: () =>
+              refreshAssistantMessageSafely(assistantMessage),
+            refreshChatSafely,
+            setStatusSafely,
+            scheduleQueueDrain,
+          }),
+        });
       },
-      onEvent: createAgentTurnEventHandler({
-        deps,
-        body,
-        ui,
-        conversationKey,
-        runtimeRequest,
-        assistantMessage,
-        pairedUserMessage: userMessage,
-        history: historyForRun,
-        isCompactCommand,
-        compactStyle: "replace-assistant",
-        onContextCompacted: () => {
-          compactEventHandled = true;
-        },
-        messageDeltaCoalescer,
-        flushMessageDeltas,
-        reasoningRefreshes,
-        queueRefresh,
-        refreshAssistant: () => refreshAssistantMessageSafely(assistantMessage),
-        refreshChatSafely,
-        setStatusSafely,
-        pushTraceEvent,
-        scheduleQueueDrain,
-      }),
-    });
-
-    // A run can end without a final event; nothing it streamed may repaint
-    // after the outcome below finalizes the message.
-    reasoningRefreshes.flushNow();
-    await finalizeAgentTurnOutcome({
-      deps,
-      item,
-      conversationKey,
-      thisRequestId,
-      outcome,
-      assistantMessage,
-      pairedUserMessage: userMessage,
-      runtimeRequest,
-      refreshChatSafely,
-      markCancelled,
-      persistAssistantOnce,
-      uiRelease,
-      skipAssistantPersist: isCompactCommand && compactEventHandled,
-    });
-  } catch (err) {
-    await handleAgentTurnFailure({
-      err,
-      deps,
-      conversationKey,
-      thisRequestId,
-      assistantMessage,
-      messageDeltaCoalescer,
+      finalize: (outcome) =>
+        finalizeAgentTurnOutcome({
+          deps,
+          item,
+          conversationKey,
+          thisRequestId,
+          outcome,
+          assistantMessage,
+          pairedUserMessage: userMessage,
+          runtimeRequest,
+          refreshChatSafely,
+          markCancelled,
+          persistAssistantOnce,
+          uiRelease,
+          skipAssistantPersist: isCompactCommand && compactEventHandled,
+        }),
       reasoningRefreshes,
-      refreshChatSafely,
-      setStatusSafely,
       markCancelled,
-      persistAssistantOnce,
+      failTurn: (err) =>
+        handleAgentTurnFailure({
+          err,
+          deps,
+          conversationKey,
+          thisRequestId,
+          assistantMessage,
+          messageDeltaCoalescer,
+          reasoningRefreshes,
+          refreshChatSafely,
+          setStatusSafely,
+          markCancelled,
+          persistAssistantOnce,
+        }),
     });
   } finally {
     if (!uiRelease.isReleased()) {
@@ -2464,98 +2560,73 @@ export async function retryAgentTurn(
 
   const agentRuntime = deps.getAgentRuntime();
   try {
-    const pushTraceEvent = (runId: string, event: AgentEvent) => {
-      const list = deps.agentRunTraceCache.get(runId) || [];
-      list.push({
-        runId,
-        seq: list.length + 1,
-        eventType: event.type,
-        payload: event,
-        createdAt: Date.now(),
-      });
-      deps.agentRunTraceCache.set(runId, list);
-    };
-
-    if (ui.inputBox) ui.inputBox.disabled = false;
-    onProviderDispatch?.();
-    const outcome = await agentRuntime.runTurn({
-      request: runtimeRequest,
-      signal: deps.currentAbortController(conversationKey)?.signal,
-      // A retry re-answers a question the usage ledger already counted; its
-      // tokens are recorded, the question tally is not moved again.
-      usageCountsAsQuestion: false,
-      onStart: async (runId) => {
-        assistantMessage.agentRunId = runId;
-        retryPair.userMessage.agentRunId = runId;
-        beginTaskRun(conversationKey, {
-          runId,
-          turnIndex:
-            taskTurnIndexFor(history, retryPair.userMessage) || undefined,
-          text: retryPair.userMessage.text,
+    await settleAgentTurn({
+      run: () => {
+        if (ui.inputBox) ui.inputBox.disabled = false;
+        onProviderDispatch?.();
+        return agentRuntime.runTurn({
+          request: runtimeRequest,
+          signal: deps.currentAbortController(conversationKey)?.signal,
+          // A retry re-answers a question the usage ledger already counted;
+          // its tokens are recorded, the question tally is not moved again.
+          usageCountsAsQuestion: false,
+          ...startAgentTurnRun({
+            deps,
+            body,
+            ui,
+            conversationKey,
+            runtimeRequest,
+            assistantMessage,
+            pairedUserMessage: retryPair.userMessage,
+            history,
+            isCompactCommand: false,
+            compactStyle: "keep-assistant",
+            messageDeltaCoalescer,
+            flushMessageDeltas,
+            reasoningRefreshes,
+            queueRefresh,
+            refreshAssistant: () =>
+              refreshAssistantMessageSafely(assistantMessage),
+            refreshChatSafely,
+            setStatusSafely,
+            scheduleQueueDrain,
+          }),
         });
-        deps.agentRunTraceCache.set(runId, []);
-        refreshChatSafely();
-        await deps.updateStoredLatestUserMessage(
-          conversationKey,
-          buildStoredUserMessagePatch(retryPair.userMessage),
-        );
       },
-      onEvent: createAgentTurnEventHandler({
-        deps,
-        body,
-        ui,
-        conversationKey,
-        runtimeRequest,
-        assistantMessage,
-        pairedUserMessage: retryPair.userMessage,
-        history,
-        isCompactCommand: false,
-        compactStyle: "keep-assistant",
-        messageDeltaCoalescer,
-        flushMessageDeltas,
-        reasoningRefreshes,
-        queueRefresh,
-        refreshAssistant: () => refreshAssistantMessageSafely(assistantMessage),
-        refreshChatSafely,
-        setStatusSafely,
-        pushTraceEvent,
-        scheduleQueueDrain,
-      }),
-    });
-
-    // A run can end without a final event; nothing it streamed may repaint
-    // after the outcome below finalizes the message.
-    reasoningRefreshes.flushNow();
-    await finalizeAgentTurnOutcome({
-      deps,
-      item,
-      conversationKey,
-      thisRequestId,
-      outcome,
-      assistantMessage,
-      pairedUserMessage: retryPair.userMessage,
-      runtimeRequest,
-      refreshChatSafely,
-      markCancelled,
-      persistAssistantOnce,
-      uiRelease,
-      skipAssistantPersist: false,
-    });
-  } catch (err) {
-    await handleAgentTurnFailure({
-      err,
-      deps,
-      conversationKey,
-      thisRequestId,
-      assistantMessage,
-      messageDeltaCoalescer,
+      finalize: (outcome) =>
+        finalizeAgentTurnOutcome({
+          deps,
+          item,
+          conversationKey,
+          thisRequestId,
+          outcome,
+          assistantMessage,
+          pairedUserMessage: retryPair.userMessage,
+          runtimeRequest,
+          refreshChatSafely,
+          markCancelled,
+          persistAssistantOnce,
+          uiRelease,
+          skipAssistantPersist: false,
+        }),
       reasoningRefreshes,
-      refreshChatSafely,
-      setStatusSafely,
       markCancelled,
-      persistAssistantOnce,
-      restorePreviousAssistant,
-      restorePairedUser,
+      failTurn: (err) =>
+        handleAgentTurnFailure({
+          err,
+          deps,
+          conversationKey,
+          thisRequestId,
+          assistantMessage,
+          messageDeltaCoalescer,
+          reasoningRefreshes,
+          refreshChatSafely,
+          setStatusSafely,
+          markCancelled,
+          persistAssistantOnce,
+          restorePreviousAssistant,
+          restorePairedUser,
+        }),
     });
   } finally {
     if (!uiRelease.isReleased()) {
