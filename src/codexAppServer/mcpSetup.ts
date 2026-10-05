@@ -32,6 +32,16 @@ export const REQUIRED_CODEX_ZOTERO_MCP_TOOL_NAMES = [
   "file_io",
   "run_command",
 ] as const;
+/**
+ * Direct-path PDF turns read the PDF with Codex's own shell, so the host
+ * access tools are hidden and only the library tools must be ready. The MCP
+ * catalog also hides control tools per scope, so readiness never requires
+ * the whole enabled list.
+ */
+export const REQUIRED_CODEX_RAW_PDF_MCP_TOOL_NAMES = [
+  "library_search",
+  "library_read",
+] as const;
 export const REQUIRED_CLAUDE_ZOTERO_MCP_TOOL_NAMES = [
   "library_search",
   "library_read",

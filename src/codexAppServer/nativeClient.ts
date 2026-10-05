@@ -30,7 +30,6 @@ import {
   addZoteroMcpToolActivityObserver,
   ZOTERO_MCP_SERVER_NAME,
   ZOTERO_MCP_SAFE_READ_TOOL_NAMES,
-  getZoteroMcpDirectPdfToolNames,
   getZoteroMcpServerName,
   qualifyZoteroMcpToolName,
   registerScopedZoteroMcpScope,
@@ -83,6 +82,7 @@ import {
   assertRequiredCodexZoteroMcpToolsReady,
   buildCodexZoteroMcpThreadConfig,
   preflightCodexZoteroMcpServer,
+  REQUIRED_CODEX_RAW_PDF_MCP_TOOL_NAMES,
   type CodexNativeMcpSetupStatus,
 } from "./mcpSetup";
 import {
@@ -3577,7 +3577,7 @@ export async function runCodexAppServerNativeTurn(input: {
             });
             assertRequiredCodexZoteroMcpToolsReady(
               mcpStatus,
-              rawPdfMode ? getZoteroMcpDirectPdfToolNames() : undefined,
+              rawPdfMode ? REQUIRED_CODEX_RAW_PDF_MCP_TOOL_NAMES : undefined,
             );
             mcpReady = true;
           } catch (error) {
