@@ -112,12 +112,13 @@ import {
   resolveConversationDeletionSurfaceAction,
   type ConversationDeletionSurfaceSnapshot,
 } from "../../conversationDeletionSurfaceSync";
+import { forgetRecentlyDeletedConversation } from "../../../../core/conversations/recentlyDeletedConversations";
 import {
-  forgetRecentlyDeletedConversation,
-  hasConversationDeletionTombstoneForKey,
-  isConversationInstanceRecentlyDeleted,
-  markConversationInstanceRecentlyDeleted,
-} from "../../../../core/conversations/recentlyDeletedConversations";
+  commitConversationRename,
+  markCommittedConversationDeletionTombstone,
+  queueWitnessedConversationDeletion,
+  shouldSeedConversationCatalogEntry,
+} from "../../conversationLifecycle";
 import {
   pendingDeletionStore,
   type PendingConversationDeletionEntry,
@@ -158,7 +159,6 @@ import { createHistorySearchPopupController } from "./historySearchPopupControll
 import { collapseDuplicateReusableConversationDrafts } from "../../standaloneConversationResolution";
 import { showConversationRenameDialog } from "../../conversationRenameDialog";
 import {
-  canCommitConversationRename,
   isConversationRenameEligible,
   type ConversationRenameIdentity,
 } from "../../conversationRenameEligibility";
@@ -549,28 +549,7 @@ export function createHistoryLifecycleController(
     kind: "global" | "paper";
     paperItemID?: number;
   }) => {
-    if (
-      pendingDeletionStore.isConversationPendingDeletion(params.conversationKey)
-    ) {
-      return null;
-    }
-    const identityWitness =
-      await conversationRepository.getCatalogIdentityWitness(params);
-    if (
-      identityWitness?.instanceID &&
-      isConversationInstanceRecentlyDeleted(
-        params.conversationKey,
-        identityWitness.instanceID,
-      )
-    ) {
-      return null;
-    }
-    if (
-      !identityWitness &&
-      (await hasConversationDeletionTombstoneForKey(params.conversationKey))
-    ) {
-      return null;
-    }
+    if (!(await shouldSeedConversationCatalogEntry(params))) return null;
     return ensureConversationCatalogEntry(params);
   };
   const touchEmptyDraftActivity = async (
@@ -3278,58 +3257,24 @@ export function createHistoryLifecycleController(
       return;
     }
     try {
-      let currentEntry = findHistoryEntryByKey(
-        target.kind,
-        target.conversationKey,
-      );
-      if (
-        !canCommitConversationRename({
-          target,
-          current: currentEntry
-            ? getHistoryEntryRenameIdentity(currentEntry)
-            : null,
-          pendingDelete:
-            Boolean(currentEntry?.isPendingDelete) ||
-            pendingDeletionStore.isConversationPendingDeletion(
-              target.conversationKey,
-            ),
-          orphan: currentEntry ? isOrphanHistoryEntry(currentEntry) : false,
-          requestPending: isRequestPending(target.conversationKey),
-        })
-      ) {
-        return;
-      }
-      const summary = await conversationRepository.getCatalogEntry(target);
-      if (
-        !isOwnedPanelOperationCurrent(ownership, "rename-conversation-commit")
-      ) {
-        return;
-      }
-      currentEntry = findHistoryEntryByKey(target.kind, target.conversationKey);
-      if (
-        !summary ||
-        summary.kind !== target.kind ||
-        !canCommitConversationRename({
-          target,
-          current: currentEntry
-            ? getHistoryEntryRenameIdentity(currentEntry)
-            : null,
-          pendingDelete:
-            Boolean(currentEntry?.isPendingDelete) ||
-            pendingDeletionStore.isConversationPendingDeletion(
-              target.conversationKey,
-            ),
-          orphan: currentEntry ? isOrphanHistoryEntry(currentEntry) : false,
-          requestPending: isRequestPending(target.conversationKey),
-        })
-      ) {
-        return;
-      }
-      await conversationRepository.setCatalogTitle({
-        ...target,
-        expectedGeneration: renameGeneration,
+      const renamed = await commitConversationRename({
+        target,
         title: nextTitle,
+        expectedGeneration: renameGeneration,
+        findCurrentEntry: () =>
+          findHistoryEntryByKey(target.kind, target.conversationKey),
+        toIdentity: (currentEntry) =>
+          getHistoryEntryRenameIdentity(currentEntry),
+        // The panel-only guards; the standalone window passes none of them.
+        isEntryPendingDelete: (currentEntry) =>
+          Boolean(currentEntry.isPendingDelete),
+        isOrphan: (currentEntry) => isOrphanHistoryEntry(currentEntry),
+        isRequestPending: (conversationKey) =>
+          isRequestPending(conversationKey),
+        isStillCurrent: () =>
+          isOwnedPanelOperationCurrent(ownership, "rename-conversation-commit"),
       });
+      if (!renamed) return;
       if (
         !isOwnedPanelOperationCurrent(ownership, "rename-conversation-result")
       ) {
@@ -3429,45 +3374,34 @@ export function createHistoryLifecycleController(
     }
 
     const wasActive = isHistoryEntryActive(targetEntry, conversationSystem);
-    // Capture the catalog row's identity witness BEFORE queueing: keys are
-    // recycled, so this is the only value that lets the finalizer prove it is
-    // still deleting this conversation. A missing witness is persisted as a
-    // durable intent and moves to identity quarantine after the Undo window.
-    const identityWitness =
-      await conversationRepository.getCatalogIdentityWitness({
-        system: conversationSystem,
-        kind: targetEntry.kind,
+    const queueResult = await queueWitnessedConversationDeletion({
+      intent: {
+        conversationKind: targetEntry.kind,
+        conversationID: targetEntry.conversationID,
         conversationKey: targetEntry.conversationKey,
-      });
-    // No await may separate this final check from queueConversationDeletion:
-    // that call freezes writes synchronously at the durable intent boundary.
-    if (
-      !isOwnedPanelOperationCurrent(ownership, "delete-conversation-commit") ||
-      rejectConversationDeletionWhileGenerating(targetEntry.conversationKey)
-    ) {
-      return false;
-    }
-    const queued = await pendingDeletionStore.queueConversationDeletion({
-      conversationKind: targetEntry.kind,
-      instanceID: identityWitness?.instanceID || "",
-      conversationID:
-        identityWitness?.conversationID || targetEntry.conversationID,
-      catalogCreatedAt: identityWitness?.catalogCreatedAt || 0,
-      conversationKey: targetEntry.conversationKey,
-      libraryID,
-      system: conversationSystem,
-      paperItemID: targetEntry.paperItemID,
-      providerSessionId: targetEntry.providerSessionId || undefined,
-      title: targetEntry.title,
-      wasActive,
+        libraryID,
+        system: conversationSystem,
+        paperItemID: targetEntry.paperItemID,
+        providerSessionId: targetEntry.providerSessionId || undefined,
+        title: targetEntry.title,
+        wasActive,
+      },
+      // The panel's final check: it still owns the operation and the
+      // conversation is not generating. It runs after the witness read with
+      // no await before the queue call.
+      finalCheck: () =>
+        isOwnedPanelOperationCurrent(ownership, "delete-conversation-commit") &&
+        !rejectConversationDeletionWhileGenerating(targetEntry.conversationKey),
     });
-    if (!queued) {
+    if (queueResult.status === "refused") return false;
+    if (queueResult.status === "failed") {
       if (status) {
         setStatus(status, t("Failed to queue deletion. Check logs."), "error");
       }
       await refreshGlobalHistoryHeader();
       return false;
     }
+    const queued = queueResult.entry;
     if (
       !isOwnedPanelOperationCurrent(ownership, "delete-conversation-result")
     ) {
@@ -4150,24 +4084,9 @@ export function createHistoryLifecycleController(
     if (event.entry.kind === "conversation") {
       const entry = event.entry;
       clearPendingDeletionCaches(entry.conversationKey);
-      // The store drops the entry before it notifies, so this tombstone is the
-      // only thing standing between the deleted key and the seeding paths.
-      // Record it before any refresh runs.
-      // Only a REAL deletion tombstones the key; a dropped intent leaves the
-      // conversation alive and it must stay seedable.
-      if (
-        (event.type === "completed" || event.type === "finalized") &&
-        !event.dropped
-      ) {
-        if (entry.instanceID) {
-          markConversationInstanceRecentlyDeleted(
-            entry.conversationKey,
-            entry.instanceID,
-            Date.now(),
-            entry.identityDigest,
-          );
-        }
-      }
+      // The panel tombstones synchronously, in the subscriber itself, so the
+      // key is retired before any queued handler or refresh runs.
+      markCommittedConversationDeletionTombstone(event);
       void enqueueConversationDeletionEvent(() =>
         handleConversationPendingDeletionEvent(
           event.type,

@@ -83,6 +83,7 @@ import {
 } from "../../utils/attachmentRefStore";
 import {
   chatHistory,
+  isRequestPending,
   loadedConversationKeys,
   webChatIsolatedConversationKeys,
 } from "./state";
@@ -140,7 +141,6 @@ import {
 import { showStandaloneConfirmationDialog } from "./standaloneConfirmationDialog";
 import { showConversationRenameDialog } from "./conversationRenameDialog";
 import {
-  canCommitConversationRename,
   isConversationRenameEligible,
   type ConversationRenameIdentity,
 } from "./conversationRenameEligibility";
@@ -167,12 +167,13 @@ import {
   createSerializedConversationDeletionEventQueue,
   resolveConversationDeletionSurfaceAction,
 } from "./conversationDeletionSurfaceSync";
+import { forgetRecentlyDeletedConversation } from "../../core/conversations/recentlyDeletedConversations";
 import {
-  forgetRecentlyDeletedConversation,
-  hasConversationDeletionTombstoneForKey,
-  isConversationInstanceRecentlyDeleted,
-  markConversationInstanceRecentlyDeleted,
-} from "../../core/conversations/recentlyDeletedConversations";
+  commitConversationRename,
+  markCommittedConversationDeletionTombstone,
+  queueWitnessedConversationDeletion,
+  shouldSeedConversationCatalogEntry,
+} from "./conversationLifecycle";
 import {
   pendingDeletionStore,
   type PendingConversationDeletionEntry,
@@ -1332,32 +1333,13 @@ export function openStandaloneChat(options?: {
         const key = Number(params.conversationKey || 0);
         if (
           key > 0 &&
-          pendingDeletionStore.isConversationPendingDeletion(key)
+          !(await shouldSeedConversationCatalogEntry({
+            system: currentConversationSystem,
+            kind: params.kind,
+            conversationKey: key,
+          }))
         ) {
           return null;
-        }
-        if (key > 0) {
-          const identityWitness =
-            await conversationRepository.getCatalogIdentityWitness({
-              system: currentConversationSystem,
-              kind: params.kind,
-              conversationKey: key,
-            });
-          if (
-            identityWitness?.instanceID &&
-            isConversationInstanceRecentlyDeleted(
-              key,
-              identityWitness.instanceID,
-            )
-          ) {
-            return null;
-          }
-          if (
-            !identityWitness &&
-            (await hasConversationDeletionTombstoneForKey(key))
-          ) {
-            return null;
-          }
         }
         return ensureConversationCatalogEntry(params);
       };
@@ -2843,46 +2825,15 @@ export function openStandaloneChat(options?: {
           return;
         }
         try {
-          let currentEntry = standaloneSidebarEntriesByKey.get(
-            target.conversationKey,
-          );
-          if (
-            !canCommitConversationRename({
-              target,
-              current: currentEntry
-                ? getStandaloneRenameIdentity(currentEntry)
-                : null,
-              pendingDelete: pendingDeletionStore.isConversationPendingDeletion(
-                target.conversationKey,
-              ),
-            })
-          ) {
-            return;
-          }
-          const summary = await conversationRepository.getCatalogEntry(target);
-          currentEntry = standaloneSidebarEntriesByKey.get(
-            target.conversationKey,
-          );
-          if (
-            !summary ||
-            summary.kind !== target.kind ||
-            !canCommitConversationRename({
-              target,
-              current: currentEntry
-                ? getStandaloneRenameIdentity(currentEntry)
-                : null,
-              pendingDelete: pendingDeletionStore.isConversationPendingDeletion(
-                target.conversationKey,
-              ),
-            })
-          ) {
-            return;
-          }
-          await conversationRepository.setCatalogTitle({
-            ...target,
-            expectedGeneration: renameGeneration,
+          const renamed = await commitConversationRename({
+            target,
             title,
+            expectedGeneration: renameGeneration,
+            findCurrentEntry: () =>
+              standaloneSidebarEntriesByKey.get(target.conversationKey),
+            toIdentity: getStandaloneRenameIdentity,
           });
+          if (!renamed) return;
           searchDocCache.delete(target.conversationKey);
           if (cancelled) return;
           await renderSidebar();
@@ -3045,22 +2996,9 @@ export function openStandaloneChat(options?: {
       ): Promise<void> => {
         if (event.entry.kind !== "conversation") return;
         const entry = event.entry;
-        // The store drops the entry before it notifies, so this tombstone is
-        // the only thing keeping renderSidebar from re-seeding the dead key.
-        // Only a REAL deletion tombstones the key; a dropped intent leaves the
-        // conversation alive and it must stay seedable.
-        if (
-          (event.type === "completed" || event.type === "finalized") &&
-          !event.dropped &&
-          entry.instanceID
-        ) {
-          markConversationInstanceRecentlyDeleted(
-            entry.conversationKey,
-            entry.instanceID,
-            Date.now(),
-            entry.identityDigest,
-          );
-        }
+        // The standalone window tombstones when its serialized handler reaches
+        // this event, before renderSidebar can re-seed the dead key.
+        markCommittedConversationDeletionTombstone(event);
         const registered =
           activeConversationKey > 0
             ? await getRegisteredConversationScope(activeConversationKey)
@@ -3202,7 +3140,23 @@ export function openStandaloneChat(options?: {
         }
       };
 
+      // Like the panel, never delete a conversation that is generating:
+      // queueing the deletion fences the send's writes, so an Undo would
+      // restore the chat with an answer that streamed but was never saved.
+      const rejectStandaloneDeletionWhileGenerating = (
+        conversationKey: number,
+      ): boolean => {
+        if (!isRequestPending(conversationKey)) return false;
+        setStandaloneHistoryStatus(
+          t("Cannot delete while generating"),
+          "ready",
+        );
+        return true;
+      };
+
       const queueStandaloneHistoryDeletion = async (rawEntry: SidebarConv) => {
+        const rawKey = Number(rawEntry.conversationKey || 0);
+        if (rawKey && rejectStandaloneDeletionWhileGenerating(rawKey)) return;
         const entry = await hydrateStandaloneHistoryDeletionEntry(rawEntry);
         const key = Number(entry.conversationKey || 0);
         if (!key) return;
@@ -3222,39 +3176,35 @@ export function openStandaloneChat(options?: {
           // Persist the write-ahead intent before moving an active window.
           // The queued event performs the move after the row is durable, so a
           // crash cannot strand the user in a new chat without an obligation.
-          // Same identity witness the panel path captures: without it the
-          // durable intent is retained and later moved to identity quarantine.
-          const identityWitness =
-            await conversationRepository.getCatalogIdentityWitness({
-              system: deletionConversationSystem,
-              kind: conversationKind,
+          // The pending-deletion check above runs before the witness read;
+          // the final check refuses a send that started in the meantime.
+          const queueResult = await queueWitnessedConversationDeletion({
+            intent: {
+              conversationKind,
+              conversationID: entry.conversationID,
               conversationKey: key,
-            });
-          const queued = await pendingDeletionStore.queueConversationDeletion({
-            conversationKind,
-            instanceID: identityWitness?.instanceID || "",
-            conversationID:
-              identityWitness?.conversationID || entry.conversationID,
-            catalogCreatedAt: identityWitness?.catalogCreatedAt || 0,
-            conversationKey: key,
-            libraryID:
-              Number(entry.libraryID || 0) ||
-              (entry.kind === "paper"
-                ? getCurrentPaperLibraryID()
-                : getCurrentLibraryScopeID()),
-            system: deletionConversationSystem,
-            paperItemID: entry.paperItemID,
-            providerSessionId: entry.providerSessionId || undefined,
-            title: entry.title || "",
-            wasActive: isActive,
+              libraryID:
+                Number(entry.libraryID || 0) ||
+                (entry.kind === "paper"
+                  ? getCurrentPaperLibraryID()
+                  : getCurrentLibraryScopeID()),
+              system: deletionConversationSystem,
+              paperItemID: entry.paperItemID,
+              providerSessionId: entry.providerSessionId || undefined,
+              title: entry.title || "",
+              wasActive: isActive,
+            },
+            finalCheck: () => !rejectStandaloneDeletionWhileGenerating(key),
           });
-          if (!queued) {
+          if (queueResult.status === "refused") return;
+          if (queueResult.status === "failed") {
             setStandaloneHistoryStatus(
               t("Failed to queue deletion. Check logs."),
               "error",
             );
             return;
           }
+          const queued = queueResult.entry;
           if (isActive) {
             // We already stepped off this chat above; remember where we came
             // from so an undo or an abandoned deletion can put the user back.
