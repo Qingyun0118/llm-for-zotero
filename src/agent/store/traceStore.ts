@@ -1,4 +1,9 @@
 import { appLogger } from "../../core/logging";
+import {
+  deleteIfPresent,
+  isMissingTableError,
+  type AgentPurgeDb,
+} from "./inTransactionDelete";
 import { config } from "../../../package.json";
 import { getClaudeRuntimeRootDir } from "../../claudeCode/projectSkills";
 import {
@@ -338,13 +343,18 @@ export function sweepOrphanedAgentTraceExports(): Promise<void> {
   return task;
 }
 
-/** Remember run IDs before the deletion transaction removes their rows. */
+/**
+ * Remember run IDs before the deletion transaction removes their rows.
+ * Returns an undo for the owning transaction to call if it rolls back: it
+ * puts back the conversation's marker as it was before this call, so it also
+ * undoes any marker a later purge in the same transaction added.
+ */
 export function rememberAgentTraceRunIDsForDeletedConversation(
   conversationKey: number,
   runIDs: readonly string[],
-): void {
+): () => void {
   const key = Math.floor(Number(conversationKey));
-  if (!Number.isFinite(key) || key <= 0) return;
+  if (!Number.isFinite(key) || key <= 0) return () => {};
   const normalized = Array.from(
     new Set(
       runIDs
@@ -352,13 +362,16 @@ export function rememberAgentTraceRunIDsForDeletedConversation(
         .filter(Boolean),
     ),
   );
-  if (normalized.length) {
-    const previous = deletedRunIDsByConversation.get(key);
-    deletedRunIDsByConversation.set(key, {
-      runIDs: Array.from(new Set([...(previous?.runIDs || []), ...normalized])),
-      generation: getConversationWriteGeneration(key),
-    });
-  }
+  if (!normalized.length) return () => {};
+  const previous = deletedRunIDsByConversation.get(key);
+  deletedRunIDsByConversation.set(key, {
+    runIDs: Array.from(new Set([...(previous?.runIDs || []), ...normalized])),
+    generation: getConversationWriteGeneration(key),
+  });
+  return () => {
+    if (previous) deletedRunIDsByConversation.set(key, previous);
+    else forgetAgentTraceRunIDsForDeletedConversation(key);
+  };
 }
 
 /**
@@ -1029,4 +1042,70 @@ export function createAgentRunEventJournal(params: {
       });
     },
   };
+}
+
+/**
+ * The run IDs a conversation's trace rows name, read inside its deletion
+ * transaction before the rows go: the runs, then the trace exports.  An
+ * absent table names none.
+ */
+export async function listAgentTraceRunIDsInTransaction(
+  db: AgentPurgeDb,
+  conversationKey: number,
+): Promise<{ runIds: string[]; exportRunIds: string[] }> {
+  const runRows = (await db
+    .queryAsync(
+      `SELECT run_id AS runId FROM ${AGENT_RUNS_TABLE} WHERE conversation_key = ?`,
+      [conversationKey],
+    )
+    .catch((error) => {
+      if (isMissingTableError(error)) return [];
+      throw error;
+    })) as Array<{ runId?: unknown }>;
+  const runIds = (runRows || [])
+    .map((row) => (typeof row.runId === "string" ? row.runId.trim() : ""))
+    .filter(Boolean);
+  const exportRows = (await db
+    .queryAsync(
+      `SELECT run_id AS runId FROM ${AGENT_TRACE_EXPORTS_TABLE} WHERE conversation_key = ?`,
+      [conversationKey],
+    )
+    .catch((error) => {
+      if (isMissingTableError(error)) return [];
+      throw error;
+    })) as Array<{ runId?: unknown }>;
+  const exportRunIds = (exportRows || [])
+    .map((row) => (typeof row.runId === "string" ? row.runId.trim() : ""))
+    .filter(Boolean);
+  return { runIds, exportRunIds };
+}
+
+/**
+ * Delete a conversation's trace rows inside its deletion transaction: the
+ * events of its runs, the runs, then the trace exports.  Each statement
+ * treats an absent table as no rows.
+ */
+export async function deleteAgentTraceRowsInTransaction(
+  db: AgentPurgeDb,
+  conversationKey: number,
+  runIds: readonly string[],
+): Promise<void> {
+  if (runIds.length) {
+    const placeholders = runIds.map(() => "?").join(", ");
+    await deleteIfPresent(
+      db,
+      `DELETE FROM ${AGENT_RUN_EVENTS_TABLE} WHERE run_id IN (${placeholders})`,
+      [...runIds],
+    );
+  }
+  await deleteIfPresent(
+    db,
+    `DELETE FROM ${AGENT_RUNS_TABLE} WHERE conversation_key = ?`,
+    [conversationKey],
+  );
+  await deleteIfPresent(
+    db,
+    `DELETE FROM ${AGENT_TRACE_EXPORTS_TABLE} WHERE conversation_key = ?`,
+    [conversationKey],
+  );
 }

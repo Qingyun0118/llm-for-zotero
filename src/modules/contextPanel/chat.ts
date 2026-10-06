@@ -27,10 +27,7 @@ import { conversationRepository } from "../../core/conversations/repository";
 import { pendingDeletionStore } from "../../core/conversations/pendingDeletionStore";
 import { isConversationKeyRetiredInMemory } from "../../shared/conversationKeyLedger";
 import { filterMessagesInPendingTurns } from "./turnMessageUtils";
-import {
-  clearAgentConversationState,
-  clearPersistedAgentConversationRowsInTransaction,
-} from "./agentConversationCleanup";
+import { deleteTrailingTurnPairs } from "./editTruncation";
 import {
   appendCodexMessage,
   clearCodexConversationSessionMetadata,
@@ -6693,47 +6690,12 @@ export async function editUserTurnAndRetry(opts: {
   history.splice(assistantIndex + 1);
 
   // Delete persisted subsequent turns
-  let trailingDeleteFailed = false;
-  for (const p of subsequentPairs) {
-    try {
-      const deleted = await withConversationWriteLock(
-        conversationKey,
-        async () => {
-          if (
-            !isConversationWriteGenerationCurrent(
-              conversationKey,
-              conversationGeneration,
-            ) ||
-            areConversationWritesFrozen(conversationKey)
-          ) {
-            return false;
-          }
-          const storageSystem = resolveConversationStorageSystem({
-            conversationKey,
-            conversationSystem: retryStorageSystem,
-          });
-          if (!storageSystem) return false;
-          await conversationRepository.deleteTurnMessages({
-            system: storageSystem,
-            conversationKey,
-            userTimestamp: p.userTs,
-            assistantTimestamp: p.assistantTs,
-            onBeforeCommit: () =>
-              clearPersistedAgentConversationRowsInTransaction(conversationKey),
-          });
-          return true;
-        },
-      );
-      if (!deleted) {
-        trailingDeleteFailed = true;
-        break;
-      }
-    } catch (err) {
-      appLogger.warn("LLM: Failed to delete subsequent stored turn", err);
-      trailingDeleteFailed = true;
-      break;
-    }
-  }
+  const trailingDeleteFailed = !(await deleteTrailingTurnPairs({
+    conversationKey,
+    pairs: subsequentPairs,
+    conversationGeneration,
+    conversationSystem: retryStorageSystem,
+  }));
   if (trailingDeleteFailed) {
     try {
       const restored = await loadStoredConversationByKey(
@@ -6754,19 +6716,9 @@ export async function editUserTurnAndRetry(opts: {
     return false;
   }
   // The edit path deletes trailing message rows directly rather than through
-  // the queued-turn coordinator.  Persistent agent state is conversation-key
-  // scoped, so clear its in-memory/trace participants after the atomic row
-  // purge before the edited retry can build a prompt.
-  if (subsequentPairs.length) {
-    try {
-      await clearAgentConversationState(conversationKey);
-    } catch (err) {
-      appLogger.warn(
-        "LLM: Failed to clear agent state after edit truncation",
-        err,
-      );
-    }
-  }
+  // the queued-turn coordinator; deleteTrailingTurnPairs has already cleared
+  // the agent state's in-memory/trace participants after the atomic row
+  // purge, before the edited retry can build a prompt.
 
   // Update user message text + timestamp
   const userMsg = history[userIndex]!;
