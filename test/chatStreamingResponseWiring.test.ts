@@ -155,6 +155,35 @@ describe("chat streaming-response wiring", function () {
       }
     });
 
+    it("saves the completed answer through the owner, apart from stream errors", function () {
+      const source = readChatSource();
+      const retry = retryFlowSource(source);
+      const send = sendFlowSource(source);
+
+      // Both flows hand the completed answer's row write to the owner's
+      // saveCompletion, after the completion is on screen, and report Ready
+      // only once it is saved. A failed save never reaches the flow's catch,
+      // which would mark the complete answer interrupted.
+      for (const flow of [retry, send]) {
+        assert.include(flow, "assistantTurn.saveCompletion(");
+        assert.include(flow, 'if (saved) setStatusSafely("Ready", "ready");');
+      }
+      const retryPresent = retry.indexOf("assistantTurn.presentCompletion(");
+      const retrySave = retry.indexOf("assistantTurn.saveCompletion(");
+      assert.isAtLeast(retryPresent, 0);
+      assert.isAbove(retrySave, retryPresent);
+      const sendPresent = send.indexOf("assistantTurn.presentCompletion(");
+      const sendSave = send.indexOf(
+        "await persistCompletedAssistantOnce()",
+        sendPresent,
+      );
+      assert.isAtLeast(sendPresent, 0);
+      assert.isAbove(sendSave, sendPresent);
+      const owner = ownerStep("async saveCompletion(", "readInterruption(");
+      assert.include(owner, "COMPLETION_SAVE_ATTEMPTS");
+      assert.include(owner, "t(ANSWER_NOT_SAVED_STATUS)");
+    });
+
     it("reads the streamed text before discarding it on the error path", function () {
       const source = readChatSource();
 
@@ -188,6 +217,48 @@ describe("chat streaming-response wiring", function () {
       assert.isAtLeast(discard, 0);
       assert.isAtLeast(snapshot, 0);
       assert.isBelow(discard, snapshot);
+    });
+  });
+
+  describe("retry user-row target", function () {
+    it("every retry user-row write targets the retried pair's own row", function () {
+      const retry = retryFlowSource(readChatSource());
+
+      // The target is the pair's stored timestamp, which a retry never
+      // changes. Without it the store writes the newest user row, which a
+      // send that arrived after Cancel may own.
+      assert.match(
+        retry,
+        /const retryUserRowTarget: UpdateLatestUserMessageOptions = \{\s+expectedTimestamp: retryPair\.userMessage\.timestamp,\s+\};/,
+      );
+      const persist = sliceBetween(
+        retry,
+        "const persistRetryUserRow = async () => {",
+        "  };",
+      );
+      assert.include(persist, "updateStoredLatestUserMessageByConversation(");
+      assert.include(persist, "retryUserRowTarget,");
+      const firstWrite = sliceBetween(
+        retry,
+        "let wrote = false;",
+        "retryUserRowWritten = wrote;",
+      );
+      assert.include(firstWrite, "withConversationWriteLock(conversationKey");
+      assert.include(
+        firstWrite,
+        "updateStoredLatestUserMessageByConversationUnlocked(",
+      );
+      assert.include(firstWrite, "retryUserRowTarget,");
+      // Both write-backs go through persistRetryUserRow, and no other user-row
+      // write in the retry flow skips the target.
+      assert.lengthOf(
+        retry.match(
+          /updateStoredLatestUserMessageByConversation(?:Unlocked)?\(/g,
+        ) || [],
+        2,
+      );
+      assert.lengthOf(retry.match(/await persistRetryUserRow\(\)/g) || [], 2);
+      assert.notInclude(retry, "stillLatest");
     });
   });
 });
