@@ -1,5 +1,6 @@
 import { assert } from "chai";
 import {
+  buildParagraphJumpSuccessStatus,
   navigateToQuote,
   type QuoteNavigationRequest,
   type QuoteNavigatorDeps,
@@ -80,6 +81,9 @@ function fakeDeps(options: {
       return {
         matched: options.jumpMatches ?? true,
         matchedPageIndex: options.jumpMatches === false ? undefined : 4,
+        ...(options.jumpMatches === false
+          ? {}
+          : { wordingUsed: rest.preferredFullQuoteText || rest.quoteText }),
         queries: [],
       } as unknown as ExactQuoteJumpResult;
     },
@@ -471,7 +475,11 @@ describe("navigateToQuote with a trusted quote's record", function () {
     );
 
     assert.equal(outcome.kind, "page-only");
-    assert.include(outcome as object, { contextItemId: 1, pageIndex: 0 });
+    assert.include(outcome as object, {
+      contextItemId: 1,
+      pageIndex: 0,
+      differentCopy: true,
+    });
     assert.deepEqual(
       calls.filter((call) => call[0] === "open").map((call) => call[1]),
       [1],
@@ -496,6 +504,7 @@ describe("navigateToQuote with a trusted quote's record", function () {
     );
 
     assert.equal(outcome.kind, "page-only");
+    assert.notProperty(outcome, "differentCopy");
     assert.deepEqual(
       calls.filter((call) => call[0] === "open").map((call) => call[1]),
       [1],
@@ -530,5 +539,155 @@ describe("navigateToQuote with a trusted quote's record", function () {
       [1, 2, 2, 3, 3],
     );
     assert.include(outcome as object, { kind: "jumped", contextItemId: 3 });
+  });
+
+  it("says when a page tie was settled on the first copy, and only then", async function () {
+    const { deps, calls } = fakeDeps({ texts: { 1: ["the quote"] } });
+    const verify = deps.verifyInBackground;
+    deps.verifyInBackground = async (candidate, quoteText, recorded) => ({
+      ...(await verify(candidate, quoteText, recorded)),
+      samePageCopyCount: 2,
+    });
+
+    const outcome = await navigateToQuote(
+      request({
+        candidates: [{ contextItemId: 1, authoritative: true, labelRank: 0 }],
+        certificate: { ...certificate, pageIndex: 0 },
+      }),
+      deps,
+    );
+
+    assert.include(outcome as object, { kind: "jumped", samePageCopyCount: 2 });
+    const jump = calls.find((call) => call[0] === "jump")![1] as {
+      sourceMatchPageOccurrence?: number;
+    };
+    assert.equal(jump.sourceMatchPageOccurrence, 0, "the first copy");
+
+    const plain = fakeDeps({ texts: { 1: ["the quote"] } });
+    const unique = await navigateToQuote(
+      request({
+        candidates: [{ contextItemId: 1, authoritative: true, labelRank: 0 }],
+        certificate,
+      }),
+      plain.deps,
+    );
+    assert.notProperty(unique, "samePageCopyCount");
+  });
+
+  it("says nothing about copies when the jump matched the fuller passage", async function () {
+    // The fuller passage can occur once and hold the second copy, so the
+    // first-copy note would be wrong.
+    const { deps } = fakeDeps({ texts: { 1: ["the quote"] } });
+    const verify = deps.verifyInBackground;
+    deps.verifyInBackground = async (candidate, quoteText, recorded) => ({
+      ...(await verify(candidate, quoteText, recorded)),
+      samePageCopyCount: 2,
+    });
+
+    const outcome = await navigateToQuote(
+      request({
+        candidates: [{ contextItemId: 1, authoritative: true, labelRank: 0 }],
+        certificate: { ...certificate, pageIndex: 0 },
+        preferredFullQuoteText: "Replication. the quote",
+      }),
+      deps,
+    );
+
+    assert.equal(outcome.kind, "jumped");
+    assert.notProperty(outcome, "samePageCopyCount");
+  });
+});
+
+describe("navigateToQuote for a reader with no page labels (D5)", function () {
+  it("opens and jumps by page index only, remembers no label, and numbers the page for display", async function () {
+    const { deps, calls } = fakeDeps({
+      texts: { 1: null },
+      viewer: { 1: ["x", "the quote"] },
+    });
+    deps.pageLabelFor = () => undefined;
+
+    const outcome = await navigateToQuote(
+      request({
+        candidates: [{ contextItemId: 1, authoritative: true, labelRank: 0 }],
+      }),
+      deps,
+    );
+
+    const opens = calls.filter((call) => call[0] === "open");
+    assert.deepEqual(opens, [
+      ["open", 1, undefined],
+      // No label: openReaderForItem drops the empty key.
+      ["open", 1, { pageIndex: 1, pageLabel: undefined }],
+    ]);
+    const jump = calls.find((call) => call[0] === "jump")![1] as object;
+    assert.notProperty(jump, "pageLabel");
+    // The fake jump lands on page index 4.
+    assert.deepEqual(
+      calls.find((call) => call[0] === "remember"),
+      ["remember", 1, "the quote", 4, undefined],
+    );
+    assert.include(outcome as object, {
+      kind: "jumped",
+      pageIndex: 4,
+      pageLabel: "5",
+    });
+  });
+
+  it("reports a page it could not highlight by its number", async function () {
+    const { deps } = fakeDeps({
+      texts: { 1: ["the quote"] },
+      jumpMatches: false,
+    });
+    deps.pageLabelFor = () => undefined;
+
+    const outcome = await navigateToQuote(
+      request({
+        candidates: [{ contextItemId: 1, authoritative: true, labelRank: 0 }],
+      }),
+      deps,
+    );
+
+    assert.include(outcome as object, {
+      kind: "page-only",
+      pageIndex: 0,
+      pageLabel: "1",
+    });
+  });
+});
+
+describe("buildParagraphJumpSuccessStatus", function () {
+  const selected = {
+    matched: true,
+    navigationStatus: "paragraph-selected",
+  } as unknown as ExactQuoteJumpResult;
+
+  it("adds which copy is highlighted when the page holds the quote more than once", function () {
+    assert.equal(
+      buildParagraphJumpSuccessStatus("5", selected, 2),
+      "Jumped to cited source (page 5, paragraph matched). This quote appears twice on the page; the first copy is highlighted.",
+    );
+    assert.equal(
+      buildParagraphJumpSuccessStatus("5", selected, 3),
+      "Jumped to cited source (page 5, paragraph matched). This quote appears 3 times on the page; the first copy is highlighted.",
+    );
+  });
+
+  it("keeps the plain status otherwise", function () {
+    assert.equal(
+      buildParagraphJumpSuccessStatus("5", selected),
+      "Jumped to cited source (page 5, paragraph matched)",
+    );
+  });
+
+  it("adds no copy note when the jump selected no occurrence", function () {
+    const pageOnly = {
+      matched: true,
+      navigationStatus: "page-only",
+    } as unknown as ExactQuoteJumpResult;
+
+    assert.equal(
+      buildParagraphJumpSuccessStatus("5", pageOnly, 2),
+      "Jumped to cited source (page 5, quote found; exact occurrence not selected)",
+    );
   });
 });

@@ -10,7 +10,7 @@ import {
   locateQuoteInPageTexts,
   locateQuoteInLivePdfReader,
   locateSelectionInPageTexts,
-  resolvePageIndexForLabel,
+  resolvePageIndexForPageNumberLabel,
   getCachedPageTextForAttachment,
   getCurrentSelectionPageLocationFromReader,
   getPageLabelForIndex,
@@ -1541,38 +1541,95 @@ describe("citation page cache warming", function () {
   });
 });
 
-describe("resolvePageIndexForLabel", function () {
-  function createReader(pageLabels?: string[], pagesCount?: number): any {
+describe("page text labels (D5)", function () {
+  function viewerReader(itemID: number, pageLabels?: string[]): any {
+    const pages = ["First page text body.", "Second page text body."];
     return {
+      itemID,
+      _item: { id: itemID },
       _window: {
         PDFViewerApplication: {
-          pdfDocument: { numPages: pagesCount ?? pageLabels?.length ?? 0 },
-          pagesCount: pagesCount ?? pageLabels?.length ?? 0,
-          pdfViewer: pageLabels ? { pageLabels } : {},
+          pdfDocument: {
+            numPages: pages.length,
+            getPage: async (pageNumber: number) => ({
+              getTextContent: async () => ({
+                items: [{ str: pages[pageNumber - 1] }],
+              }),
+            }),
+          },
+          // Zotero's PDF.js keeps its labels on the private field.
+          pdfViewer: pageLabels ? { _pageLabels: pageLabels } : {},
         },
       },
     };
   }
 
-  it("returns null for empty or unknown page labels", function () {
-    const reader = createReader(["i", "ii", "1", "2"], 4);
-
-    assert.isNull(resolvePageIndexForLabel(reader, ""));
-    assert.isNull(resolvePageIndexForLabel(reader, "S1"));
+  it("records no label for PDFWorker page text, which has none", async function () {
+    clearPageTextCache();
+    const restore = installPdfWorkerStub(async () => ({
+      text: "Alpha page body.Beta page body.",
+      pageChars: [16, 15],
+    }));
+    try {
+      await locateQuoteInLivePdfReader(
+        { _item: { id: 7301 }, itemID: 7301 },
+        "Alpha page body",
+      );
+      const pages = getCachedPageTextForAttachment(7301)?.pages || [];
+      assert.lengthOf(pages, 2);
+      // Was "1" and "2", guessed from the page index.
+      assert.deepEqual(
+        pages.map((page) => page.pageLabel),
+        [undefined, undefined],
+      );
+    } finally {
+      restore();
+    }
   });
 
-  it("resolves numeric page labels without defaulting unknown labels to page 1", function () {
-    const reader = createReader(undefined, 20);
+  it("records no label for viewer page text, even when the PDF has printed labels", async function () {
+    clearPageTextCache();
+    const restore = installPdfWorkerStub(async () => null);
+    try {
+      // The cache key is shared with the PDFWorker path, and page text feeds
+      // the model's numbering, which is physical. A printed label such as
+      // "iv" comes from getPageLabelForIndex where a page is shown.
+      await warmPageTextCache(viewerReader(7302, ["iv", "v"]));
+      const labelled = getCachedPageTextForAttachment(7302)?.pages || [];
+      assert.deepEqual(
+        labelled.map((page) => page.pageIndex),
+        [0, 1],
+      );
+      assert.deepEqual(
+        labelled.map((page) => page.pageLabel),
+        [undefined, undefined],
+      );
 
-    assert.equal(resolvePageIndexForLabel(reader, "12"), 11);
-    assert.isNull(resolvePageIndexForLabel(reader, "appendix"));
+      await warmPageTextCache(viewerReader(7303));
+      assert.deepEqual(
+        (getCachedPageTextForAttachment(7303)?.pages || []).map(
+          (page) => page.pageLabel,
+        ),
+        [undefined, undefined],
+      );
+    } finally {
+      restore();
+    }
   });
 
-  it("resolves exact custom and roman page labels", function () {
-    const reader = createReader(["i", "ii", "1", "2"], 4);
+  it("reads an old guessed label as a page number, never through printed labels", function () {
+    const reader = {
+      _window: {
+        PDFViewerApplication: {
+          pdfDocument: { numPages: 4 },
+          pdfViewer: { _pageLabels: ["i", "ii", "1", "2"] },
+        },
+      },
+    };
 
-    assert.equal(resolvePageIndexForLabel(reader, "ii"), 1);
-    assert.equal(resolvePageIndexForLabel(reader, "2"), 3);
+    assert.equal(resolvePageIndexForPageNumberLabel(reader, "2"), 1);
+    assert.equal(resolvePageIndexForPageNumberLabel(reader, "ii"), 1);
+    assert.isNull(resolvePageIndexForPageNumberLabel(reader, "appendix"));
   });
 });
 
@@ -1635,16 +1692,60 @@ describe("live reader page labels", function () {
     );
   });
 
-  it("reads a printed label from the PDF.js page accessibility label", function () {
+  it("reads a printed label from the PDF.js page's data-page-label", function () {
+    // D5 (was: read "431" from the aria-label "Page: 431. Index: 4").
+    // PDF.js sets data-page-label exactly when the page has a printed label.
     const reader = createSelectedPageReader();
     delete reader._window.PDFViewerApplication.pdfViewer._pageLabels;
     const pageElement = reader._window.document.querySelectorAll()[0];
     pageElement.getAttribute = (name: string) => {
-      if (name === "aria-label") return "Page: 431. Index: 4";
+      if (name === "data-page-label") return "431";
       return name === "data-page-number" ? "4" : null;
     };
 
     assert.equal(getPageLabelForIndex(reader, 3), "431");
+  });
+
+  it("returns no label when neither the viewer nor the DOM has a real one", function () {
+    // data-page-number is PDF.js's own 1-based page number, not a label.
+    const reader = createSelectedPageReader();
+    delete reader._window.PDFViewerApplication.pdfViewer._pageLabels;
+    assert.isUndefined(getPageLabelForIndex(reader, 3));
+
+    const pageElement = reader._window.document.querySelectorAll()[0];
+    pageElement.getAttribute = (name: string) =>
+      name === "data-page-index" ? "3" : null;
+    assert.isUndefined(getPageLabelForIndex(reader, 3));
+
+    // PDF.js fills the landmark's l10n args and aria-label with
+    // `pageLabel ?? pageNumber`, so without data-page-label they hold the
+    // page number, not a printed label.
+    pageElement.getAttribute = (name: string) => {
+      if (name === "data-l10n-args") return JSON.stringify({ page: 4 });
+      if (name === "aria-label") return "Page 4";
+      return name === "data-page-number" ? "4" : null;
+    };
+    assert.isUndefined(getPageLabelForIndex(reader, 3));
+
+    assert.isUndefined(getPageLabelForIndex({}, 3));
+  });
+
+  it("leaves the selection snapshot without a label when the PDF has none", function () {
+    const reader = createSelectedPageReader();
+    delete reader._window.PDFViewerApplication.pdfViewer._pageLabels;
+
+    assert.deepEqual(
+      getCurrentSelectionPageLocationFromReader(
+        reader,
+        "Selected place-cell passage",
+      ),
+      {
+        contextItemId: 42,
+        pageIndex: 3,
+        pageLabel: undefined,
+        pagesScanned: 1,
+      },
+    );
   });
 });
 

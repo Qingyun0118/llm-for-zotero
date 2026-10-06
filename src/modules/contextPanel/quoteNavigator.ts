@@ -18,6 +18,7 @@ import { sanitizeText } from "../../utils/textSanitization";
 import { getActiveReaderForSelectedTab } from "../../services/pdf/zoteroReaderTabs";
 import {
   buildCitationQuoteHash,
+  citationPageDisplayLabel,
   lookupCitationPage,
   rememberCitationPage,
 } from "../../services/pdf/citationNavigationCache";
@@ -244,7 +245,7 @@ function logParagraphJumpFailure(params: {
   displayCitationLabel: string;
   quoteText: string;
   pageIndex: number;
-  pageLabel: string;
+  pageLabel?: string;
   paragraphJump: ExactQuoteJumpResult;
 }): void {
   appLogger.warn("LLM citation paragraph jump failed", {
@@ -272,7 +273,8 @@ export type CitationParagraphJumpParams = {
   displayCitationLabel: string;
   quoteText: string;
   pageIndex: number;
-  pageLabel: string;
+  /** The reader's printed label for the page, when it reports one. */
+  pageLabel?: string;
   citationId?: string;
   sourceFingerprint?: string;
   sourceMatchPageOccurrence?: number;
@@ -349,24 +351,11 @@ export const attemptCitationParagraphJumpForTests =
   attemptCitationParagraphJump;
 
 /**
- * Resolve the effective page label after a paragraph jump.  If
- * FindController landed on a different page than the text search
- * predicted, use FindController's result — it is authoritative.
+ * Said when a trusted click stays on a copy of the paper whose PDF is not
+ * the one the answer quoted.
  */
-export function resolveJumpedPageLabel(
-  reader: any,
-  paragraphJump: ExactQuoteJumpResult,
-  fallbackPageLabel: string,
-  pageLabelFor: QuoteNavigatorDeps["pageLabelFor"] = getPageLabelForIndex,
-): string {
-  if (paragraphJump.matched && paragraphJump.matchedPageIndex !== undefined) {
-    return (
-      pageLabelFor(reader, paragraphJump.matchedPageIndex) ||
-      `${paragraphJump.matchedPageIndex + 1}`
-    );
-  }
-  return fallbackPageLabel;
-}
+export const DIFFERENT_COPY_STATUS =
+  "Opened a different copy of this paper; the quote could not be confirmed here.";
 
 export function buildParagraphJumpFailureStatus(
   pageLabel: string,
@@ -383,29 +372,38 @@ export function buildParagraphJumpFailureStatus(
 export function buildParagraphJumpSuccessStatus(
   pageLabel: string,
   paragraphJump: ExactQuoteJumpResult,
+  samePageCopyCount?: number,
 ): string {
-  return paragraphJump.navigationStatus === "paragraph-selected"
-    ? `Jumped to cited source (page ${pageLabel}, paragraph matched)`
-    : `Jumped to cited source (page ${pageLabel}, quote found; exact occurrence not selected)`;
+  const jumped =
+    paragraphJump.navigationStatus === "paragraph-selected"
+      ? `Jumped to cited source (page ${pageLabel}, paragraph matched)`
+      : `Jumped to cited source (page ${pageLabel}, quote found; exact occurrence not selected)`;
+  // Only a jump that selected an occurrence highlighted the first copy.
+  return paragraphJump.navigationStatus === "paragraph-selected" &&
+    samePageCopyCount !== undefined &&
+    samePageCopyCount > 1
+    ? `${jumped}. ${buildFirstOfSamePageCopiesNote(samePageCopyCount)}`
+    : jumped;
+}
+
+/**
+ * Said after a jump to a page that holds the quote more than once, when
+ * nothing recorded which copy the answer quoted.
+ */
+function buildFirstOfSamePageCopiesNote(samePageCopyCount: number): string {
+  const times =
+    samePageCopyCount === 2 ? "twice" : `${samePageCopyCount} times`;
+  return `This quote appears ${times} on the page; the first copy is highlighted.`;
 }
 
 // ---------------------------------------------------------------------------
 // The verified page cache
 
-function normalizeCachedCitationPageLabel(
-  pageIndex: number,
-  pageLabel?: string,
-): string | null {
-  const normalizedPageIndex = Number.isFinite(pageIndex)
-    ? Math.floor(pageIndex)
-    : NaN;
-  if (!Number.isFinite(normalizedPageIndex) || normalizedPageIndex < 0) {
-    return null;
-  }
-  const normalizedPageLabel = sanitizeText(pageLabel || "").trim();
-  return normalizedPageLabel || null;
-}
-
+/**
+ * Record the page a jump verified. `pageLabel` is the reader's printed
+ * label, when it reported one; none is guessed from the page index. Returns
+ * how the page is shown, or null when nothing was stored.
+ */
 export function rememberCachedCitationPage(
   contextItemId: number,
   quoteText: string,
@@ -423,34 +421,41 @@ export function rememberCachedCitationPage(
   }
   const normalizedQuoteText = sanitizeText(quoteText || "").trim();
   if (!normalizedQuoteText) return null;
-  const normalizedPageLabel = normalizeCachedCitationPageLabel(
-    pageIndex,
-    pageLabel,
-  );
-  if (!normalizedPageLabel) return null;
+  if (!Number.isFinite(pageIndex) || pageIndex < 0) return null;
   return rememberCitationPage({
     contextItemId: normalizedContextItemId,
     quoteText: normalizedQuoteText,
     pageIndex: Math.floor(pageIndex),
-    pageLabel: normalizedPageLabel,
+    pageLabel,
   });
 }
 
 /**
- * Look up the citation page cache for a corrected page label.
- * Used by note saving to replace the LLM's claimed page with the
- * actual page verified by FindController.
+ * The page a jump verified for this quote: its index, and the printed label
+ * the reader reported, if any. Note saving uses it to replace the LLM's
+ * claimed page with the actual page verified by FindController.
  */
+export function lookupCachedCitationPageLocation(
+  contextItemId: number,
+  quoteText: string,
+): ReaderPageLocation | null {
+  const entry = lookupCitationPage({
+    contextItemId,
+    quoteText: sanitizeText(quoteText || "").trim(),
+  });
+  if (!entry) return null;
+  return entry.pageLabel
+    ? { pageIndex: entry.pageIndex, pageLabel: entry.pageLabel }
+    : { pageIndex: entry.pageIndex };
+}
+
+/** How the verified page for this quote is shown, if one is cached. */
 export function lookupCachedCitationPage(
   contextItemId: number,
   quoteText: string,
 ): string | null {
-  return (
-    lookupCitationPage({
-      contextItemId,
-      quoteText: sanitizeText(quoteText || "").trim(),
-    })?.pageLabel ?? null
-  );
+  const location = lookupCachedCitationPageLocation(contextItemId, quoteText);
+  return location ? citationPageDisplayLabel(location) : null;
 }
 
 // ---------------------------------------------------------------------------
@@ -460,17 +465,16 @@ type ResolvedQuoteCitationMatch = {
   candidate: QuoteTargetCandidate;
   pageIndex: number;
   /**
-   * Set only by the viewer fallback, from `getPageLabelForIndex`. When the
-   * reader exposes no printed label for the page, that helper returns
-   * `${pageIndex + 1}`, so this label can be a guess rather than one the
-   * reader reported. Zotero navigates by label when one is supplied, and a
-   * PDF's printed labels need not track its page order, so a guessed label
-   * can land on the wrong page.
+   * Set only by the viewer fallback, and only when the reader reports a
+   * printed label for the page. The page index drives navigation; the label
+   * is for display and saved-note links, so none is guessed from the index.
    */
   pageLabel?: string;
   quoteText: string;
   sourceMatchText?: string;
   sourceMatchPageOccurrence?: number;
+  /** See QuoteTargetVerification.samePageCopyCount. */
+  samePageCopyCount?: number;
 };
 
 /**
@@ -560,27 +564,40 @@ export type RecordedQuoteLocation = {
 function settleCopiesOnOnePage(
   result: LivePdfSelectionLocateResult,
   recorded: RecordedQuoteLocation | undefined,
-): LivePdfSelectionLocateResult {
+): SettledLocateResult {
   if (result.status !== "ambiguous" || !recorded) return result;
   const pages = new Set(result.matchedPageIndexes);
   if (pages.size !== 1) return result;
   const [pageIndex] = pages;
-  // Without a recorded copy, only the recorded page may settle the tie;
-  // the jump then picks the copy, as the old page-hint path did.
+  // Without a recorded copy, only the recorded page may settle the tie.
   if (recorded.occurrence === undefined && recorded.pageIndex !== pageIndex) {
     return result;
   }
-  return {
+  const settled = {
     ...result,
-    status: "resolved",
+    status: "resolved" as const,
     computedPageIndex: pageIndex,
-    ...(recorded.occurrence !== undefined
-      ? { sourceMatchPageOccurrence: recorded.occurrence }
-      : {}),
     reason:
       "The complete quote occurs more than once on one PDF page; the recorded page or occurrence picks it.",
   };
+  if (recorded.occurrence !== undefined) {
+    return { ...settled, sourceMatchPageOccurrence: recorded.occurrence };
+  }
+  // Nothing says which copy the answer quoted. Without an occurrence the
+  // jump cannot align one of identical copies, so it highlights the first
+  // and the status line says so.
+  return {
+    ...settled,
+    sourceMatchPageOccurrence: 0,
+    samePageCopyCount: Math.max(2, Math.floor(result.totalMatches) || 0),
+  };
 }
+
+/** A located result, plus how many copies a settled tie left unpicked. */
+type SettledLocateResult = LivePdfSelectionLocateResult & {
+  /** See QuoteTargetVerification.samePageCopyCount. */
+  samePageCopyCount?: number;
+};
 
 /**
  * Read a candidate's PDF text in the background to decide whether it really
@@ -630,6 +647,9 @@ async function verifyQuoteInCitationCandidate(
     pageIndex: result.computedPageIndex,
     sourceMatchText: result.sourceMatchText,
     sourceMatchPageOccurrence: result.sourceMatchPageOccurrence,
+    ...(result.samePageCopyCount !== undefined
+      ? { samePageCopyCount: result.samePageCopyCount }
+      : {}),
     reason: result.reason,
   };
 }
@@ -701,12 +721,13 @@ async function locateQuoteByOpeningCitationCandidates(
         matches.push({
           candidate,
           pageIndex,
-          // A guessed `${pageIndex + 1}` when the reader has no printed label
-          // for this page; see ResolvedQuoteCitationMatch.pageLabel.
           pageLabel: deps.pageLabelFor(reader, pageIndex) || undefined,
           quoteText: searchText,
           sourceMatchText: result.sourceMatchText,
           sourceMatchPageOccurrence: result.sourceMatchPageOccurrence,
+          ...(result.samePageCopyCount !== undefined
+            ? { samePageCopyCount: result.samePageCopyCount }
+            : {}),
         });
         break;
       }
@@ -833,6 +854,11 @@ export type QuoteNavigationOutcome =
       pageIndex: number;
       pageLabel: string;
       jump: ExactQuoteJumpResult;
+      /**
+       * Set when the page holds the quote this many times and nothing
+       * recorded which copy the answer quoted; the first is highlighted.
+       */
+      samePageCopyCount?: number;
     }
   /** The reader is on the verified page, but the highlight failed. */
   | {
@@ -841,6 +867,11 @@ export type QuoteNavigationOutcome =
       pageIndex: number;
       pageLabel: string;
       jump: ExactQuoteJumpResult;
+      /**
+       * The paper holds the quote, but its PDF is not the one the answer
+       * quoted (another copy or version), and no other paper held it.
+       */
+      differentCopy?: true;
     }
   /** No candidate holds the quote. */
   | { kind: "not-found"; reason: string }
@@ -948,6 +979,9 @@ export async function navigateToQuote(
           quoteText: resolution.quoteText,
           sourceMatchText: resolution.sourceMatchText,
           sourceMatchPageOccurrence: resolution.sourceMatchPageOccurrence,
+          ...(resolution.samePageCopyCount !== undefined
+            ? { samePageCopyCount: resolution.samePageCopyCount }
+            : {}),
         };
       }
     } else if (resolution.status === "unverifiable") {
@@ -994,9 +1028,7 @@ export async function navigateToQuote(
     });
     if (!reader) return { kind: "open-failed", contextItemId };
     const pageLabel =
-      deps.pageLabelFor(reader, match.pageIndex) ||
-      match.pageLabel ||
-      `${match.pageIndex + 1}`;
+      deps.pageLabelFor(reader, match.pageIndex) || match.pageLabel;
 
     const jump = await deps.jump({
       reader,
@@ -1004,7 +1036,7 @@ export async function navigateToQuote(
       displayCitationLabel: req.displayCitationLabel,
       quoteText: match.quoteText,
       pageIndex: match.pageIndex,
-      pageLabel,
+      ...(pageLabel ? { pageLabel } : {}),
       sourceMatchPageOccurrence:
         certificate.sourceMatchPageOccurrence ??
         match.sourceMatchPageOccurrence,
@@ -1014,45 +1046,72 @@ export async function navigateToQuote(
         ? { fallbackQuoteTexts: req.searchTexts.slice() }
         : {}),
     });
-    const jumpedLabel = resolveJumpedPageLabel(
+    const landed = jumpedPage(
       reader,
       jump,
-      pageLabel,
+      { pageIndex: match.pageIndex, pageLabel },
       deps.pageLabelFor,
     );
     if (!jump.matched) {
       const pageOnly: QuoteNavigationOutcome = {
         kind: "page-only",
         contextItemId,
-        pageIndex: match.pageIndex,
-        pageLabel: jumpedLabel,
+        pageIndex: landed.pageIndex,
+        pageLabel: citationPageDisplayLabel(landed),
         jump,
       };
       if (jump.failureStage !== "source-fingerprint-mismatch") return pageOnly;
       // The quote is in this paper, but it is not the PDF the answer quoted
       // (a second copy or version). Try the others before settling here.
       ruledOut.add(contextItemId);
-      wrongPdf = pageOnly;
+      wrongPdf = { ...pageOnly, differentCopy: true };
       continue;
     }
-    const jumpedPageIndex = jump.matchedPageIndex ?? match.pageIndex;
     if (req.policy.rememberPage) {
       deps.rememberPage(
         contextItemId,
         match.quoteText,
-        jumpedPageIndex,
-        jumpedLabel,
+        landed.pageIndex,
+        landed.pageLabel,
       );
     }
     return {
       kind: "jumped",
       tier: "verified",
       contextItemId,
-      pageIndex: jumpedPageIndex,
-      pageLabel: jumpedLabel,
+      pageIndex: landed.pageIndex,
+      pageLabel: citationPageDisplayLabel(landed),
       jump,
+      // The copy count describes the duplicated quote. When the jump matched
+      // a fuller passage instead, occurrence 0 picked that passage, which
+      // may hold any of the copies.
+      ...(match.samePageCopyCount !== undefined &&
+      jump.wordingUsed === sanitizeText(match.quoteText || "").trim()
+        ? { samePageCopyCount: match.samePageCopyCount }
+        : {}),
     };
   }
+}
+
+/**
+ * The page a jump left the reader on: the one FindController matched on,
+ * which wins over the predicted page, else the predicted page. Its label is
+ * the reader's printed label, when it reports one; none is guessed. Show it
+ * with `citationPageDisplayLabel`.
+ */
+export function jumpedPage(
+  reader: any,
+  jump: ExactQuoteJumpResult,
+  predicted: { pageIndex: number; pageLabel?: string },
+  pageLabelFor: QuoteNavigatorDeps["pageLabelFor"] = getPageLabelForIndex,
+): ReaderPageLocation {
+  const matchedPageIndex = jump.matched ? jump.matchedPageIndex : undefined;
+  const pageIndex = matchedPageIndex ?? predicted.pageIndex;
+  // Read again: a reader just opened may report its labels only now.
+  const pageLabel =
+    pageLabelFor(reader, pageIndex) ||
+    (pageIndex === predicted.pageIndex ? predicted.pageLabel : undefined);
+  return pageLabel ? { pageIndex, pageLabel } : { pageIndex };
 }
 
 /**
@@ -1116,8 +1175,7 @@ async function navigateInActiveReader(
     };
   }
   const pageIndex = Math.floor(result.computedPageIndex);
-  const pageLabel =
-    deps.pageLabelFor(activeReader, pageIndex) || `${pageIndex + 1}`;
+  const pageLabel = deps.pageLabelFor(activeReader, pageIndex) || undefined;
   const contextItemId = getReaderItemId(activeReader);
   const jump = await deps.jump({
     reader: activeReader,
@@ -1125,7 +1183,7 @@ async function navigateInActiveReader(
     displayCitationLabel: req.displayCitationLabel,
     quoteText,
     pageIndex,
-    pageLabel,
+    ...(pageLabel ? { pageLabel } : {}),
     sourceMatchPageOccurrence:
       certificate.sourceMatchPageOccurrence ?? result.sourceMatchPageOccurrence,
     verifiedSourceMatchText: result.sourceMatchText,
@@ -1138,31 +1196,35 @@ async function navigateInActiveReader(
   });
   // FindController's page wins if it landed somewhere other than the page
   // the text search predicted.
-  const jumpedLabel = resolveJumpedPageLabel(
+  const landed = jumpedPage(
     activeReader,
     jump,
-    pageLabel,
+    { pageIndex, pageLabel },
     deps.pageLabelFor,
   );
   if (!jump.matched) {
     return {
       kind: "page-only",
       contextItemId,
-      pageIndex,
-      pageLabel: jumpedLabel,
+      pageIndex: landed.pageIndex,
+      pageLabel: citationPageDisplayLabel(landed),
       jump,
     };
   }
-  const jumpedPageIndex = jump.matchedPageIndex ?? pageIndex;
   if (req.policy.rememberPage) {
-    deps.rememberPage(contextItemId, quoteText, jumpedPageIndex, jumpedLabel);
+    deps.rememberPage(
+      contextItemId,
+      quoteText,
+      landed.pageIndex,
+      landed.pageLabel,
+    );
   }
   return {
     kind: "jumped",
     tier: "active-reader",
     contextItemId,
-    pageIndex: jumpedPageIndex,
-    pageLabel: jumpedLabel,
+    pageIndex: landed.pageIndex,
+    pageLabel: citationPageDisplayLabel(landed),
     jump,
   };
 }

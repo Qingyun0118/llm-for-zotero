@@ -491,7 +491,7 @@ describe("citation navigation characterization", function () {
         assert.equal(r.status?.variant, "ready");
       });
 
-      it("on one page, the stored page hint naming that page settles the tie and opens that page", async function () {
+      it("on one page, the stored page hint naming that page settles the tie and highlights the first copy", async function () {
         const paper = samePage();
         const r = install({ papers: [paper] });
         const button = trustedButton(r, paper, {
@@ -501,18 +501,59 @@ describe("citation navigation characterization", function () {
         await r.click(button);
 
         // No recorded occurrence: the hinted page is verified and opened, and
-        // the jump is left to pick a copy. Without an occurrence the jump
-        // cannot align one of two identical copies, so the click ends on the
-        // page. The old page-hint path also opened this page, and then
-        // reported "matched more than one occurrence" without a highlight.
+        // the jump highlights the first copy (D4). The status says that the
+        // page holds the quote twice.
         assert.deepEqual(r.timeline, ["read 11", "open 11", "navigate 11"]);
         assert.deepEqual(r.opened, [
           { itemId: 11, location: { pageIndex: 1 } },
         ]);
-        assert.deepEqual(failedJumpStages(r), ["full-quote-not-on-page"]);
+        assert.deepEqual(failedJumpStages(r), []);
+        assert.equal(agains(r), 0, "the jump selects the first copy");
         assert.deepEqual(statusTexts(r), [
           "sending: Locating cited quote...",
-          "error: Jumped to page 102. Paragraph jump failed: Neither the complete quote nor a strong unique partial source span could be aligned to the cited PDF page.",
+          "ready: Jumped to cited source (page 102, paragraph matched). This quote appears twice on the page; the first copy is highlighted.",
+        ]);
+      });
+
+      it("on one page holding three copies, the hint settles the tie and the status counts them", async function () {
+        const paper = smith({
+          pages: [
+            "Introduction. Neural populations in the hippocampus encode spatial context over many days.",
+            `Results. ${QUOTE_A}. Replication. ${QUOTE_A}. Second replication. ${QUOTE_A}.`,
+            "Discussion. These findings constrain models of memory consolidation.",
+          ],
+          findMatchCount: 3,
+        });
+        const r = install({ papers: [paper] });
+        const button = trustedButton(r, paper, {
+          quoteCitation: quoteCitation({ pageHintIndex: 1 }),
+        });
+
+        await r.click(button);
+
+        assert.deepEqual(failedJumpStages(r), []);
+        assert.equal(agains(r), 0, "the jump selects the first copy");
+        assert.deepEqual(statusTexts(r), [
+          "sending: Locating cited quote...",
+          "ready: Jumped to cited source (page 102, paragraph matched). This quote appears 3 times on the page; the first copy is highlighted.",
+        ]);
+      });
+
+      it("on one page, a fuller passage that occurs once is highlighted without the first-copy note", async function () {
+        const paper = samePage();
+        const r = install({ papers: [paper] });
+        const button = trustedButton(r, paper, {
+          quoteCitation: quoteCitation({ pageHintIndex: 1 }),
+          // Occurs once on the page, and holds the second copy.
+          paragraphQuoteText: `Replication. ${QUOTE_A}`,
+        });
+
+        await r.click(button);
+
+        assert.deepEqual(failedJumpStages(r), []);
+        assert.deepEqual(statusTexts(r), [
+          "sending: Locating cited quote...",
+          "ready: Jumped to cited source (page 102, paragraph matched)",
         ]);
       });
 
@@ -556,13 +597,17 @@ describe("citation navigation characterization", function () {
         await r.click(button);
 
         // The viewer verifies the page and the reader moves there; as above,
-        // the jump without an occurrence ends on the page.
+        // the jump highlights the first copy (D4).
         assert.deepEqual(r.opened, [{ itemId: 11, location: undefined }]);
         assert.deepEqual(r.reader(11)!.navigations, [
           { pageIndex: 1, pageLabel: "102" },
         ]);
-        assert.deepEqual(failedJumpStages(r), ["full-quote-not-on-page"]);
-        assert.equal(r.status?.variant, "error");
+        assert.deepEqual(failedJumpStages(r), []);
+        assert.equal(agains(r), 0);
+        assert.deepEqual(statusTexts(r), [
+          "sending: Locating cited quote...",
+          "ready: Jumped to cited source (page 102, paragraph matched). This quote appears twice on the page; the first copy is highlighted.",
+        ]);
       });
 
       it("on two pages, the first copy wins", async function () {
@@ -1139,9 +1184,12 @@ describe("citation navigation characterization", function () {
       assert.deepEqual(failedJumpStages(r), ["source-fingerprint-mismatch"]);
       assert.deepEqual(r.opened, [{ itemId: 11, location: { pageIndex: 1 } }]);
       assert.deepEqual(r.findQueries(11), []);
+      // D3 (was "Jumped to page 102. Paragraph jump failed: The cited source
+      // fingerprint does not match the loaded PDF."): the status says the
+      // reader stays on another copy of the paper.
       assert.deepEqual(statusTexts(r), [
         "sending: Locating cited quote...",
-        "error: Jumped to page 102. Paragraph jump failed: The cited source fingerprint does not match the loaded PDF.",
+        "error: Opened a different copy of this paper; the quote could not be confirmed here.",
       ]);
     });
   });
@@ -1459,16 +1507,19 @@ describe("citation navigation characterization", function () {
         { itemId: unreadable[1].attachmentId, location: undefined },
       ]);
       // The winner is already the active reader, so it is moved, not reopened.
-      // PINNED, LOOKS WRONG (D4): ResolvedQuoteCitationMatch.pageLabel is
-      // documented as "only set when a reader actually reported it", but
-      // getPageLabelForIndex falls back to `${pageIndex + 1}`, so a PDF with
-      // no printed labels still navigates by a label guessed from the index.
+      // FIXED (D5; was { pageIndex: 1, pageLabel: "2" }): a PDF with no
+      // printed labels navigates by page index only, with no label guessed
+      // from the index. The status line still names page 2 for display.
       assert.deepEqual(r.reader(unreadable[1].attachmentId)!.navigations, [
-        { pageIndex: 1, pageLabel: "2" },
+        { pageIndex: 1 },
       ]);
       assert.equal(
         r.status?.text,
         "Jumped to cited source (page 2, paragraph matched)",
+      );
+      assert.equal(
+        lookupCachedCitationPage(unreadable[1].attachmentId, QUOTE_A),
+        "2",
       );
     });
 
@@ -1613,8 +1664,9 @@ describe("citation navigation characterization", function () {
 
         await r.click(button);
 
+        // D5 (was { pageIndex: 0, pageLabel: "1" }): no guessed label.
         assert.deepEqual(r.reader(paper.attachmentId)!.navigations, [
-          { pageIndex: 0, pageLabel: "1" },
+          { pageIndex: 0 },
         ]);
         assert.equal(r.status?.variant, "ready");
       });
@@ -1832,6 +1884,9 @@ describe("citation navigation characterization", function () {
           rawSnippet: QUOTE_MISSING,
           cleanedSnippet: QUOTE_MISSING,
           label: "p. 103",
+          // D5: a read now records its page index; a label-only read is an
+          // old one, whose label is a page number (see below).
+          pageIndex: 2,
           granularity: "passage",
         },
       });
@@ -1853,6 +1908,109 @@ describe("citation navigation characterization", function () {
         "sending: Locating this passage…",
         "sending: Locating this passage…",
         "warning: Couldn't find this passage in the PDF; opened page 103",
+      ]);
+    });
+
+    it("Task progress: a read that recorded its page index opens that page, whatever its label says (D5)", async function () {
+      const paper = smith();
+      const r = install({ papers: [paper] });
+
+      const outcome = await navigateToTaskPaperPassage({
+        body: r.body,
+        target: {
+          itemId: 10,
+          contextItemId: 11,
+          libraryID: 1,
+          rawSnippet: QUOTE_MISSING,
+          cleanedSnippet: QUOTE_MISSING,
+          // Printed label 101 sits on page index 0; the read recorded index 2.
+          label: "p. 101",
+          pageIndex: 2,
+          granularity: "passage",
+        },
+      });
+
+      assert.equal(outcome, "page");
+      // Was page index 0, found from the label.
+      assert.deepEqual(r.reader(11)!.navigations, [
+        { pageIndex: 2, pageLabel: "103" },
+        { pageIndex: 2, pageLabel: "103" },
+      ]);
+      assert.equal(
+        r.status?.text,
+        "Couldn't find this passage in the PDF; opened page 103",
+      );
+    });
+
+    it("Task progress: a read saved before reads recorded a page index still opens the page its label numbers (D5)", async function () {
+      // Every label stored before this change was a page number guessed from
+      // the index, so "p. 2" means physical page 2, not printed page 2.
+      const paper = smith();
+      const r = install({ papers: [paper] });
+
+      const outcome = await navigateToTaskPaperPassage({
+        body: r.body,
+        target: {
+          itemId: 10,
+          contextItemId: 11,
+          libraryID: 1,
+          rawSnippet: QUOTE_MISSING,
+          cleanedSnippet: QUOTE_MISSING,
+          label: "p. 2",
+          granularity: "passage",
+        },
+      });
+
+      assert.equal(outcome, "page");
+      assert.deepEqual(r.reader(11)!.navigations, [
+        { pageIndex: 1, pageLabel: "102" },
+        { pageIndex: 1, pageLabel: "102" },
+      ]);
+    });
+
+    it("Task progress: an old read's guessed label is never matched against printed labels (D5)", async function () {
+      // Printed labels i…x, then 1…4: printed "4" sits on page index 13.
+      const printed = [
+        "i",
+        "ii",
+        "iii",
+        "iv",
+        "v",
+        "vi",
+        "vii",
+        "viii",
+        "ix",
+        "x",
+        "1",
+        "2",
+        "3",
+        "4",
+      ];
+      const paper = smith({
+        pageLabels: printed,
+        pages: printed.map((label) => `Page ${label} body text.`),
+      });
+      const r = install({ papers: [paper] });
+
+      const outcome = await navigateToTaskPaperPassage({
+        body: r.body,
+        target: {
+          itemId: 10,
+          contextItemId: 11,
+          libraryID: 1,
+          rawSnippet: QUOTE_MISSING,
+          cleanedSnippet: QUOTE_MISSING,
+          // Saved before reads recorded a page index: a guessed page number.
+          label: "p. 4",
+          granularity: "passage",
+        },
+      });
+
+      assert.equal(outcome, "page");
+      // Physical page 4 (index 3), printed "iv"; not printed "4" (index 13).
+      assert.deepEqual(r.reader(11)!.navigations, [
+        { pageIndex: 3, pageLabel: "iv" },
+        { pageIndex: 3, pageLabel: "iv" },
       ]);
     });
 
@@ -1956,7 +2114,8 @@ describe("citation navigation characterization", function () {
 
         const outcome = await navigateToTaskPaperPassage({
           body: r.body,
-          target: passage(QUOTE_MISSING, "p. 103"),
+          // D5: a read now records its page index with its label.
+          target: { ...passage(QUOTE_MISSING, "p. 103"), pageIndex: 2 },
         });
 
         assert.equal(outcome, "jumped");
@@ -2108,7 +2267,8 @@ describe("citation navigation characterization", function () {
         r.reader(scanned.attachmentId)!.navigations,
         freshNavigations,
       );
-      assert.deepEqual(freshNavigations, [{ pageIndex: 1, pageLabel: "2" }]);
+      // D5 (was { pageIndex: 1, pageLabel: "2" }): no guessed label.
+      assert.deepEqual(freshNavigations, [{ pageIndex: 1 }]);
     });
 
     it("still finds a Task progress passage in an unreadable PDF once a partial cache exists", async function () {
