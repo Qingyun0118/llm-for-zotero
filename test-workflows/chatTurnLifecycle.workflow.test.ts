@@ -60,6 +60,8 @@ type Row = Record<string, unknown>;
 /** One streamed chat completion that the test controls chunk by chunk. */
 type HeldStream = {
   url: string;
+  /** The JSON request body the panel sent. */
+  requestBody: string;
   push: (text: string) => void;
   reason: (text: string) => void;
   usage: (promptTokens: number, completionTokens: number) => void;
@@ -106,7 +108,11 @@ async function waitFor<T>(
   return value;
 }
 
-function createHeldStream(url: string, signal?: AbortSignal): HeldStream {
+function createHeldStream(
+  url: string,
+  requestBody: string,
+  signal?: AbortSignal,
+): HeldStream {
   const encoder = new TextEncoder();
   const queue: Uint8Array[] = [];
   let ended = false;
@@ -148,6 +154,7 @@ function createHeldStream(url: string, signal?: AbortSignal): HeldStream {
   }, 20);
   const stream: HeldStream = {
     url,
+    requestBody,
     push: (text) => send({ choices: [{ delta: { content: text } }] }),
     reason: (text) =>
       send({ choices: [{ delta: { reasoning_content: text } }] }),
@@ -318,7 +325,11 @@ describe("workflow: plain-chat turn lifecycle (send and retry)", function () {
           }
         })();
         if (target === `${API_BASE}/chat/completions` && payload.stream) {
-          const stream = createHeldStream(target, init?.signal || undefined);
+          const stream = createHeldStream(
+            target,
+            String(init?.body || ""),
+            init?.signal || undefined,
+          );
           streams.push(stream);
           return {
             ok: true,
@@ -474,13 +485,12 @@ describe("workflow: plain-chat turn lifecycle (send and retry)", function () {
     assert.equal(row.text, user.text);
     assert.equal(row.timestamp, user.timestamp);
     assert.deepEqual(user.forcedSkillIds, [FORCED_SKILL_ID]);
-    // Pins current behaviour; suspected bug B1, see design review: the send
-    // inserts the user row WITH forced_skill_ids_json, then its context-plan
-    // update omits forcedSkillIds, and the UPDATE writes every column, so the
-    // stored row loses the forced skills that memory still holds.
-    assert.isNull(
-      row.forced_skill_ids_json,
-      "B1: the send's user-row update drops forced skill ids",
+    // The context-plan update writes every column, so it must carry the
+    // forced skills the insert stored.
+    assert.include(
+      String(row.forced_skill_ids_json || ""),
+      FORCED_SKILL_ID,
+      "the send's user-row update keeps forced skill ids",
     );
     assert.equal(
       (user.selectedTagContexts as Row[] | undefined)?.[0]?.name,
@@ -521,10 +531,10 @@ describe("workflow: plain-chat turn lifecycle (send and retry)", function () {
       assert.isNull(row.interrupted);
       assert.equal(row.completion_status, "complete");
       assert.isNull(row.completion_reason);
-      // Pins current behaviour; suspected bug B2, see design review: send
-      // rows never carry the context-usage snapshot (retry rows do).
-      assert.isNull(row.context_tokens, "B2: send row has no context tokens");
-      assert.isNull(row.context_window, "B2: send row has no context window");
+      // Like retry rows, send rows carry the context-usage snapshot (the
+      // provider's prompt tokens), so a reopened chat shows this turn's count.
+      assert.equal(row.context_tokens, 11, "send row stores context tokens");
+      assert.isNumber(row.context_window, "send row stores context window");
       assert.notProperty(assistant, "contextTokens");
       assertSendUserRow(state);
 
@@ -541,6 +551,34 @@ describe("workflow: plain-chat turn lifecycle (send and retry)", function () {
       });
       assert.equal(await statusText(), "Ready");
     });
+  });
+
+  it("send with a tag chip: the request carries the tag's papers", async function () {
+    const tagged = await api().createPaperWithPdfFixture({
+      title: "Chat turn lifecycle tagged paper",
+      pdfTitle: "chat-turn-lifecycle-tagged.pdf",
+      pages: ["A tagged page that only the tag scope brings in."],
+    });
+    try {
+      await surfacing(async () => {
+        const taggedItem = Zotero.Items.get(tagged.parentItemId);
+        taggedItem.addTag(TAG_NAME);
+        await taggedItem.saveTx();
+
+        const started = await startSend("What do the tagged papers say?");
+        const stream = await nextStream(0);
+        // The plain-chat planner resolves the tag chip to its papers, so the
+        // request names the tag scope and the tagged paper.
+        assert.include(stream.requestBody, `tag=${TAG_NAME}`);
+        assert.include(stream.requestBody, "papers=1");
+        assert.include(stream.requestBody, "Chat turn lifecycle tagged paper");
+        stream.push("Tagged answer.");
+        stream.finish();
+        await waitForSendSettled(started);
+      });
+    } finally {
+      await api().cleanupFixture(tagged);
+    }
   });
 
   it("send cancelled while the stream is held: partial text kept, not interrupted", async function () {
@@ -578,7 +616,8 @@ describe("workflow: plain-chat turn lifecycle (send and retry)", function () {
       assert.isNull(row.interrupted);
       assert.isNull(row.completion_status);
       assert.isNull(row.completion_reason);
-      assert.isNull(row.context_tokens, "B2: send row has no context tokens");
+      // Without a usage report the row keeps the send's estimate.
+      assert.isNumber(row.context_tokens, "send row stores context tokens");
       assertSendUserRow(state);
 
       const usage = await settledUsageRows(started.conversationKey, 1);
@@ -592,7 +631,7 @@ describe("workflow: plain-chat turn lifecycle (send and retry)", function () {
     });
   });
 
-  it("send cancelled before the first block is released: [Cancelled] prefixes the buffered text (B6)", async function () {
+  it("send cancelled before the first block is released keeps just the buffered text", async function () {
     await surfacing(async () => {
       const started = await startSend("Cancel before any block is released.");
       const stream = await nextStream(0);
@@ -603,12 +642,10 @@ describe("workflow: plain-chat turn lifecycle (send and retry)", function () {
 
       const assistant = lastAssistant(state);
       const row = storedOf(state, "assistant");
-      // Pins current behaviour; suspected bug B6: Cancel before the first
-      // released block prefixes [Cancelled] to the buffered text, see design
-      // review. The Cancel click handler writes it into the empty streaming
-      // message before the flow flushes the buffered text.
-      assert.equal(assistant.text, "[Cancelled]Only buffered text");
-      assert.equal(row.text, "[Cancelled]Only buffered text");
+      // The Cancel click handler writes [Cancelled] into the empty streaming
+      // message; the buffered text that the flow flushes replaces it.
+      assert.equal(assistant.text, "Only buffered text");
+      assert.equal(row.text, "Only buffered text");
       assert.equal(assistant.streaming, false);
       assert.equal(await statusText(), "Cancelled");
     });
@@ -645,7 +682,8 @@ describe("workflow: plain-chat turn lifecycle (send and retry)", function () {
       assertReasoning(assistant, row, "Thinking before the drop.");
       assert.equal(row.interrupted, 1);
       assert.isNull(row.completion_status);
-      assert.isNull(row.context_tokens, "B2: send row has no context tokens");
+      // Without a usage report the row keeps the send's estimate.
+      assert.isNumber(row.context_tokens, "send row stores context tokens");
       assertSendUserRow(state);
 
       const usage = await settledUsageRows(started.conversationKey, 1);
@@ -727,17 +765,19 @@ describe("workflow: plain-chat turn lifecycle (send and retry)", function () {
     assert.equal(user.modelEntryId, RETRY_ENTRY_ID);
     assert.equal(row.model_name, RETRY_MODEL);
     assert.equal(row.model_entry_id, RETRY_ENTRY_ID);
-    assert.isNull(row.forced_skill_ids_json, "B1: forced skill ids stay lost");
-    // Pins current behaviour; suspected bug B1, see design review: the retry
-    // rewrites the user row without selectedTagContexts, so tag_contexts_json
-    // is NULLed although memory still holds the tag.
+    assert.include(
+      String(row.forced_skill_ids_json || ""),
+      FORCED_SKILL_ID,
+      "the retry's user-row rewrite keeps forced skill ids",
+    );
     assert.equal(
       (user.selectedTagContexts as Row[] | undefined)?.[0]?.name,
       TAG_NAME,
     );
-    assert.isNull(
-      row.tag_contexts_json,
-      "B1: the retry's user-row rewrite drops tag contexts",
+    assert.include(
+      String(row.tag_contexts_json || ""),
+      TAG_NAME,
+      "the retry's user-row rewrite keeps tag contexts",
     );
   };
 
@@ -755,6 +795,8 @@ describe("workflow: plain-chat turn lifecycle (send and retry)", function () {
         RETRY_ENTRY_ID,
       );
       const stream = await nextStream(1);
+      // The retry's planner also gets the stored tag chip.
+      assert.include(stream.requestBody, `tag=${TAG_NAME}`);
       stream.reason("Reading again.");
       stream.push("Retried ");
       stream.push("answer.");
@@ -780,7 +822,7 @@ describe("workflow: plain-chat turn lifecycle (send and retry)", function () {
       assert.isNull(row.interrupted);
       assert.equal(row.completion_status, "complete");
       // Retry rows carry the context-usage snapshot (the provider's prompt
-      // tokens); send rows do not (B2).
+      // tokens), as send rows do.
       assert.equal(row.context_tokens, 13, "retry row stores context tokens");
       assert.isNumber(row.context_window, "retry row stores context window");
       assertRetryUserRow(state);
@@ -833,19 +875,15 @@ describe("workflow: plain-chat turn lifecycle (send and retry)", function () {
       const userBefore = storedOf(before, "user");
       const userAfter = storedOf(state, "user");
       assert.include(String(userBefore.tag_contexts_json || ""), TAG_NAME);
-      // Pins current behaviour; suspected bug B1, see design review: the
-      // restore rewrites the user row from memory but without
-      // selectedTagContexts, so the only stored difference after a fully
-      // restored retry is the lost tag context.
+      // The restore rewrites the user row from memory with every field, so
+      // the stored rows are exactly the rows before the retry.
       assert.deepEqual(
         state.storedRows,
-        before.storedRows.map((row) =>
-          row.role === "user" ? { ...row, tag_contexts_json: null } : row,
-        ),
-        "stored rows are restored except the B1 tag-context loss",
+        before.storedRows,
+        "stored rows are restored exactly",
       );
       assert.equal(userAfter.model_name, MODEL);
-      assert.isNull(userAfter.tag_contexts_json);
+      assert.include(String(userAfter.tag_contexts_json || ""), TAG_NAME);
 
       const usage = await settledUsageRows(conversationKey, 2);
       assert.include(usage[1], {
@@ -980,7 +1018,7 @@ describe("workflow: plain-chat turn lifecycle (send and retry)", function () {
     });
   });
 
-  it("retry cancelled before the first block is released: [Cancelled] prefixes the buffered text (B6)", async function () {
+  it("retry cancelled before the first block is released keeps just the buffered text", async function () {
     await surfacing(async () => {
       const conversationKey = await completedSend(
         "Answer once.",
@@ -1000,18 +1038,16 @@ describe("workflow: plain-chat turn lifecycle (send and retry)", function () {
 
       const assistant = lastAssistant(state);
       const row = storedOf(state, "assistant");
-      // Pins current behaviour; suspected bug B6: Cancel before the first
-      // released block prefixes [Cancelled] to the buffered text, see design
-      // review. The Cancel click handler writes it into the empty streaming
-      // message before the flow flushes the buffered text.
-      assert.equal(assistant.text, "[Cancelled]Only buffered retry text");
-      assert.equal(row.text, "[Cancelled]Only buffered retry text");
+      // The Cancel click handler writes [Cancelled] into the empty streaming
+      // message; the buffered text that the flow flushes replaces it.
+      assert.equal(assistant.text, "Only buffered retry text");
+      assert.equal(row.text, "Only buffered retry text");
       assert.equal(assistant.streaming, false);
       assert.equal(await statusText(), "Cancelled");
     });
   });
 
-  it("retry over an answer with a document id keeps the stale id", async function () {
+  it("retry over an answer with a document id clears the stale id", async function () {
     await surfacing(async () => {
       const seeded = await api().seedPanelStoredTurn(
         panel.panelId,
@@ -1035,20 +1071,41 @@ describe("workflow: plain-chat turn lifecycle (send and retry)", function () {
       const row = storedOf(state, "assistant");
       assert.equal(assistant.text, "Plain retried answer.");
       assert.equal(assistant.completionStatus, "complete");
-      // Pins current behaviour; suspected bug B3, see design review: the
-      // retry never resets documentId at start, so a plain retried answer
-      // stays tied to the previous answer's document, in memory and stored.
-      assert.equal(
-        assistant.documentId,
-        "workflow-stale-document",
-        "B3: the retried answer keeps the stale document id",
-      );
-      assert.equal(
-        row.document_id,
-        "workflow-stale-document",
-        "B3: the stored retried answer keeps the stale document id",
-      );
+      // The plain retried answer is no longer tied to the previous
+      // answer's document, in memory or stored.
+      assert.isUndefined(assistant.documentId);
+      assert.isNotOk(row.document_id);
       assert.equal(row.text, "Plain retried answer.");
+      await settledUsageRows(conversationKey, 1);
+    });
+  });
+
+  it("retry error with no output over a document answer restores the document id", async function () {
+    await surfacing(async () => {
+      const seeded = await api().seedPanelStoredTurn(
+        panel.panelId,
+        "Write it up as a document.",
+        "Document answer.",
+        { documentId: "workflow-kept-document", runMode: "chat" },
+      );
+      const conversationKey = seeded.conversationKey;
+
+      const retry = api().retryLatestPanelResponse(
+        panel.panelId,
+        RETRY_ENTRY_ID,
+      );
+      const stream = await nextStream(0);
+      stream.fail("workflow upstream unavailable");
+      assert.isUndefined(await retry, "a failed retry returns nothing");
+      const state = await read(conversationKey);
+
+      const assistant = lastAssistant(state);
+      assert.equal(assistant.text, "Document answer.");
+      assert.equal(assistant.documentId, "workflow-kept-document");
+      assert.equal(
+        storedOf(state, "assistant").document_id,
+        "workflow-kept-document",
+      );
       await settledUsageRows(conversationKey, 1);
     });
   });

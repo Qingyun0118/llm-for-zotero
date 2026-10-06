@@ -730,6 +730,69 @@ describe("agent engine final UI release", function () {
     }
   });
 
+  it("keeps the forced skills in every user-row update of a send", async function () {
+    const conversationKey = 4705;
+    const storedUpdates: Array<Record<string, unknown>> = [];
+    const runtime = {
+      getCapabilities: () => ({
+        streaming: true,
+        toolCalls: true,
+        multimodal: false,
+      }),
+      runTurn: async (params: {
+        onStart?: (runId: string) => Promise<void> | void;
+        onEvent?: (event: any) => Promise<void> | void;
+      }) => {
+        await params.onStart?.("run-forced-skills");
+        await params.onEvent?.({
+          type: "tool_result",
+          callId: "paper-read",
+          name: "paper_read",
+          ok: true,
+          content: {
+            paperContext: {
+              itemId: 99,
+              contextItemId: 100,
+              title: "Tool citation",
+              contentSourceMode: "text",
+            },
+          },
+        });
+        return {
+          kind: "completed",
+          runId: "run-forced-skills",
+          text: "Done.",
+          usedFallback: false,
+        } as AgentRuntimeOutcome;
+      },
+    } as unknown as AgentRuntime;
+    const deps = createDeps({
+      runtime,
+      pendingWrites: [],
+      idleRestores: [],
+      statuses: [],
+    });
+    deps.updateStoredLatestUserMessage = async (_key, update) => {
+      storedUpdates.push(update as unknown as Record<string, unknown>);
+    };
+
+    await sendAgentTurn(
+      {
+        body: {} as Element,
+        item: fakeItem(conversationKey),
+        question: "Use the forced skill.",
+        forcedSkillIds: ["skill-forced"],
+      },
+      deps,
+    );
+
+    // The first write, onStart, and the tool-result citation update.
+    assert.isAtLeast(storedUpdates.length, 3);
+    for (const update of storedUpdates) {
+      assert.deepEqual(update.forcedSkillIds, ["skill-forced"]);
+    }
+  });
+
   it("preserves raw PDF identity in retry start and tool-result full-row updates", async function () {
     const conversationKey = 4702;
     const pdfContext = {
@@ -2943,9 +3006,10 @@ describe("agent turn endings from the real runtime", function () {
 
 // Golden records of the exact parameter object each agent request site hands
 // deps.buildAgentRuntimeRequest. They pin today's per-site differences (the
-// retry omits forcedSkillIds, reuses the stored citation papers and uses the
-// stored selected-passage note contexts); unifying any of them is a product
-// decision, not a refactor.
+// retry reuses the stored citation papers and uses the stored selected-passage
+// note contexts); unifying any of them is a product decision, not a refactor.
+// Like the plain-chat retry, the agent retry hands over the stored forced
+// skills.
 describe("agent request sites (golden)", function () {
   const paperA = {
     libraryID: 1,
@@ -3280,11 +3344,12 @@ describe("agent request sites (golden)", function () {
       attachments: userMessage.modelAttachments,
       localDocuments: undefined,
       screenshots: screenshotImages,
+      forcedSkillIds: userMessage.forcedSkillIds,
       effectiveRequestConfig,
       history: [],
     });
-    // The retry hands over no forced skills at all (not even an undefined key).
-    assert.notProperty(params, "forcedSkillIds");
+    // The retry hands over the forced skills the user row stored.
+    assert.strictEqual(params.forcedSkillIds, userMessage.forcedSkillIds);
     assert.strictEqual(params.selectedTextNoteContexts, storedNoteContexts);
     assert.strictEqual(params.citationPaperContexts, storedCitationPapers);
     assert.strictEqual(

@@ -157,6 +157,7 @@ import {
   finalizeCancelledAssistantMessage,
 } from "./assistantTurn";
 import { toStoredAssistantRow } from "./storedAssistantRow";
+import { toStoredUserRowPatch } from "./storedUserRow";
 import { getStreamInterruptionLabel } from "./streamInterruption";
 import {
   restoreRetryUserSnapshot,
@@ -4284,6 +4285,8 @@ type AssistantMessageSnapshot = Pick<
   | "webchatCompletionReason"
   | "quoteCitations"
   | "quoteDisplayOverride"
+  | "documentId"
+  | "planDocumentId"
 >;
 
 export function findLatestRetryPair(
@@ -4336,6 +4339,8 @@ function takeAssistantSnapshot(message: Message): AssistantMessageSnapshot {
           ),
         }
       : undefined,
+    documentId: message.documentId,
+    planDocumentId: message.planDocumentId,
   };
 }
 
@@ -4376,6 +4381,8 @@ function restoreAssistantSnapshot(
         ),
       }
     : undefined;
+  message.documentId = snapshot.documentId;
+  message.planDocumentId = snapshot.planDocumentId;
   message.streaming = false;
 }
 
@@ -5630,6 +5637,11 @@ export async function retryLatestAssistantResponse(
   assistantMessage.reasoningDetails = undefined;
   assistantMessage.reasoningOpen = isReasoningExpandedByDefault();
   assistantMessage.agentRunId = undefined;
+  if (!continueIncomplete) {
+    // A new answer is not the previous answer's document.
+    assistantMessage.documentId = undefined;
+    assistantMessage.planDocumentId = undefined;
+  }
   assistantMessage.pendingAgentTraceEvents = undefined;
   assistantMessage.generatedImages = undefined;
   assistantMessage.streaming = true;
@@ -5838,31 +5850,10 @@ export async function retryLatestAssistantResponse(
   const persistRetryUserRow = async () => {
     await updateStoredLatestUserMessageByConversation(
       conversationKey,
-      {
+      toStoredUserRowPatch(retryPair.userMessage, {
         conversationGeneration,
-        text: retryPair.userMessage.text,
-        timestamp: retryPair.userMessage.timestamp,
-        runMode: retryPair.userMessage.runMode,
-        agentRunId: retryPair.userMessage.agentRunId,
-        selectedText: retryPair.userMessage.selectedText,
-        selectedTextContexts: retryPair.userMessage.selectedTextContexts,
         selectedTexts: retryPair.userMessage.selectedTexts || [],
-        selectedTextSources: retryPair.userMessage.selectedTextSources,
-        selectedTextPaperContexts:
-          retryPair.userMessage.selectedTextPaperContexts,
-        screenshotImages: retryPair.userMessage.screenshotImages,
-        paperContexts: retryPair.userMessage.paperContexts,
-        pdfPaperContexts: retryPair.userMessage.pdfPaperContexts,
-        fullTextPaperContexts: retryPair.userMessage.fullTextPaperContexts,
-        citationPaperContexts: retryPair.userMessage.citationPaperContexts,
-        selectedCollectionContexts:
-          retryPair.userMessage.selectedCollectionContexts,
-        attachments: retryPair.userMessage.attachments,
-        modelAttachments: retryPair.userMessage.modelAttachments,
-        modelName: retryPair.userMessage.modelName,
-        modelEntryId: retryPair.userMessage.modelEntryId,
-        modelProviderLabel: retryPair.userMessage.modelProviderLabel,
-      },
+      }),
       effectiveStorageSystem,
     );
   };
@@ -6000,6 +5991,7 @@ export async function retryLatestAssistantResponse(
           paperContexts: retryPaperContexts,
           fullTextPaperContexts: retryFullTextPaperContexts,
           selectedCollectionContexts,
+          selectedTagContexts,
           recentPaperContexts,
           history: llmHistory,
           effectiveRequestConfig,
@@ -8538,6 +8530,9 @@ export async function sendQuestion(
     assistantPersisted = true;
     if (!shouldPersistTurn) return;
     await assistantTurn.persistTrace(status);
+    // Like the retry rows, the send row stores the context-usage snapshot,
+    // so a reopened chat shows this turn's context count.
+    const latestContextSnapshot = contextUsageSnapshots.get(conversationKey);
     await persistConversationMessage(
       conversationKey,
       {
@@ -8551,6 +8546,8 @@ export async function sendQuestion(
         webchatCompletionReason: assistantMessage.webchatCompletionReason,
         webchatChatUrl: assistantMessage.webchatChatUrl,
         webchatChatId: assistantMessage.webchatChatId,
+        contextTokens: latestContextSnapshot?.contextTokens,
+        contextWindow: latestContextSnapshot?.contextWindow,
       },
       effectiveStorageSystem,
     );
@@ -8776,6 +8773,7 @@ export async function sendQuestion(
           paperContexts: paperContextsForMessage,
           fullTextPaperContexts: fullTextPaperContextsForMessage,
           selectedCollectionContexts: selectedCollectionContextsForMessage,
+          selectedTagContexts: selectedTagContextsForMessage,
           recentPaperContexts,
           history: llmHistory,
           effectiveRequestConfig,
@@ -8802,30 +8800,7 @@ export async function sendQuestion(
     );
     await updateStoredLatestUserMessageByConversation(
       conversationKey,
-      {
-        conversationGeneration,
-        text: userMessage.text,
-        timestamp: userMessage.timestamp,
-        runMode: userMessage.runMode,
-        agentRunId: userMessage.agentRunId,
-        selectedText: userMessage.selectedText,
-        selectedTextContexts: userMessage.selectedTextContexts,
-        selectedTexts: userMessage.selectedTexts,
-        selectedTextSources: userMessage.selectedTextSources,
-        selectedTextPaperContexts: userMessage.selectedTextPaperContexts,
-        screenshotImages: userMessage.screenshotImages,
-        paperContexts: userMessage.paperContexts,
-        pdfPaperContexts: userMessage.pdfPaperContexts,
-        fullTextPaperContexts: userMessage.fullTextPaperContexts,
-        citationPaperContexts: userMessage.citationPaperContexts,
-        selectedCollectionContexts: userMessage.selectedCollectionContexts,
-        selectedTagContexts: userMessage.selectedTagContexts,
-        attachments: userMessage.attachments,
-        modelAttachments: userMessage.modelAttachments,
-        modelName: userMessage.modelName,
-        modelEntryId: userMessage.modelEntryId,
-        modelProviderLabel: userMessage.modelProviderLabel,
-      },
+      toStoredUserRowPatch(userMessage, { conversationGeneration }),
       effectiveStorageSystem,
     );
 
