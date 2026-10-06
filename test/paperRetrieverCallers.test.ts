@@ -210,6 +210,30 @@ describe("per-paper retrieval callers", function () {
       assert.include(other.contextText, "SECOND-SOURCE");
     });
 
+    it("keys non-ASCII questions by their letters, so different CJK questions miss", async function () {
+      const first = await retrieve(
+        buildPdfContext("Panel Cache Paper", [
+          "结论 FIRST-CJK 校准漂移 在 各 会话 中 测量。",
+        ]),
+        "这篇论文的主要结论是什么？",
+      );
+      assert.include(first.contextText, "FIRST-CJK");
+      const other = await retrieve(
+        buildPdfContext("Panel Cache Paper", [
+          "方法 SECOND-CJK 作者 使用 了 新 方法。",
+        ]),
+        "作者使用了什么方法？",
+      );
+      assert.include(other.contextText, "SECOND-CJK");
+      assert.notInclude(other.contextText, "FIRST-CJK");
+      // The same question up to punctuation still hits.
+      const repeated = await retrieve(
+        buildPdfContext("Panel Cache Paper", ["THIRD-CJK 无关 文本。"]),
+        "作者使用了什么方法?",
+      );
+      assert.include(repeated.contextText, "SECOND-CJK");
+    });
+
     it("bypasses the cache, for reads and writes, when the paper has locked chunks", async function () {
       const question = "How is calibration drift measured?";
       const locked = await retrieve(FIRST, question, [0]);
@@ -310,11 +334,9 @@ describe("per-paper retrieval callers", function () {
       }
     });
 
-    it("serves the old source's candidates after a source-mode switch", async function () {
-      // pins current behaviour; suspected bug N10
-      // A source-mode switch reloads the paper text but does not invalidate
-      // retrieval candidates, and the panel key ignores the source, so the
-      // panel keeps answering from the previous source's chunks.
+    it("drops the old source's candidates when a source-mode switch reloads the text", async function () {
+      // The panel key ignores the source, so the reload itself must drop the
+      // candidates built from the previous source's chunks.
       const restore = composeRetrievalCandidateInvalidation();
       try {
         const question = "How is calibration drift measured?";
@@ -345,8 +367,8 @@ describe("per-paper retrieval callers", function () {
         const reloaded = paperTextStore.peek(paper.contextItemId)!;
         assert.equal(reloaded.sourceType, "mineru", "the text did reload");
         const after = await retrieve(reloaded, question);
-        assert.include(after.contextText, "PDF-TEXT");
-        assert.notInclude(after.contextText, "MINERU-TEXT");
+        assert.include(after.contextText, "MINERU-TEXT");
+        assert.notInclude(after.contextText, "PDF-TEXT");
       } finally {
         restore();
       }
