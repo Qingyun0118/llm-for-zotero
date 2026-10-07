@@ -1386,6 +1386,8 @@ export function waitForCodexAppServerTurnCompletion(params: {
   /** Starts generation only after event listeners are installed. */
   startTurn?: () => Promise<string>;
   threadId?: string;
+  /** Shares the children tracked for this turn with its request handlers. */
+  childThreadIds?: Set<string>;
   onTextDelta?: (delta: string) => void | Promise<void>;
   onReasoning?: (event: ReasoningEvent) => void | Promise<void>;
   onUsage?: (usage: UsageStats) => void | Promise<void>;
@@ -1430,6 +1432,7 @@ export function waitForCodexAppServerTurnCompletion(params: {
   }
   return new Promise((resolve, reject) => {
     let turnId = params.turnId || "";
+    const childThreadIds = params.childThreadIds ?? new Set<string>();
     let proposalText: string | undefined;
     let callbacks = Promise.resolve();
     let callbackError: unknown;
@@ -1602,7 +1605,12 @@ export function waitForCodexAppServerTurnCompletion(params: {
         clearTimeout(timeoutId);
       }
       timeoutId = setTimeout(() => {
-        if (proc.hasPendingUserInput(params.threadId, turnId)) {
+        if (
+          proc.hasPendingUserInput(params.threadId, turnId) ||
+          Array.from(childThreadIds).some((threadId) =>
+            proc.hasPendingUserInput(threadId),
+          )
+        ) {
           scheduleTimeout();
           return;
         }
@@ -1661,6 +1669,7 @@ export function waitForCodexAppServerTurnCompletion(params: {
       if (settled) return;
       settled = true;
       unsubActivity();
+      childThreadIds.clear();
       unsubDelta();
       unsubReasoningSummary();
       unsubReasoningDetails();
@@ -1680,7 +1689,6 @@ export function waitForCodexAppServerTurnCompletion(params: {
 
     // Threads a sub-agent of this turn runs on; their traffic keeps this turn
     // alive, other conversations' traffic on the shared process does not.
-    const childThreadIds = new Set<string>();
     const unsubActivity = proc.onActivity((message) => {
       const messageParams = message.params;
       const messageThreadId =
@@ -1694,7 +1702,9 @@ export function waitForCodexAppServerTurnCompletion(params: {
           const item = (messageParams as { item?: Record<string, unknown> })
             ?.item;
           const receivers =
-            item?.receiverThreadIds ?? item?.receiver_thread_ids;
+            item?.type === "subAgentActivity"
+              ? [item.agentThreadId]
+              : (item?.receiverThreadIds ?? item?.receiver_thread_ids);
           if (Array.isArray(receivers)) {
             for (const receiver of receivers) {
               if (typeof receiver === "string" && receiver) {

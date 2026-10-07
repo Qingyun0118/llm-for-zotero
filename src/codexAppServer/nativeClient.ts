@@ -2555,11 +2555,11 @@ function registerNativeApprovalRequestHandlers(params: {
     { threadId: string; turnId?: string } | undefined
   >;
   /**
-   * The thread this turn runs on, once known. Requests that name another
-   * thread belong to another conversation's turn on the same process and are
-   * left to its handlers.
+   * The thread this turn runs on, once known. Requests outside this thread
+   * and its tracked children are left to another conversation's handlers.
    */
   getActiveThreadId?: () => string | undefined;
+  childThreadIds?: ReadonlySet<string>;
   /**
    * Called when stopping the turn after an unanswered question failed (the
    * interrupt timed out), so the process is retired the way a timed-out turn
@@ -2576,7 +2576,10 @@ function registerNativeApprovalRequestHandlers(params: {
         // A request that names no thread cannot be routed; the first turn
         // takes it, as before.
         if (!requestThreadId) return true;
-        return requestThreadId === params.getActiveThreadId?.();
+        return (
+          requestThreadId === params.getActiveThreadId?.() ||
+          Boolean(params.childThreadIds?.has(requestThreadId))
+        );
       }
     : undefined;
   const disposers = CODEX_APP_SERVER_APPROVAL_REQUEST_METHODS.map((method) =>
@@ -2619,9 +2622,17 @@ function registerNativeApprovalRequestHandlers(params: {
           if (controller.signal.aborted) return { answers: {} };
           params.isTurnStillLive?.();
           const record = normalizeRecord(rawParams);
+          const requestThreadId =
+            normalizeNonEmptyString(record.threadId) ||
+            normalizeNonEmptyString(record.conversationId);
+          const isChildRequest =
+            requestThreadId !== identity?.threadId &&
+            params.childThreadIds?.has(requestThreadId);
+          // A tracked child has its own turn ID, not the parent's turn ID.
           if (
             params.getTurnIdentity &&
-            ((record.threadId && record.threadId !== identity?.threadId) ||
+            !isChildRequest &&
+            ((requestThreadId && requestThreadId !== identity?.threadId) ||
               (record.turnId && record.turnId !== identity?.turnId))
           )
             throw new Error("Stale native request");
@@ -2636,11 +2647,17 @@ function registerNativeApprovalRequestHandlers(params: {
               ? { answers: {} }
               : resolveCodexNativeApprovalRequest(request).response;
           params.isTurnStillLive?.();
+          const interruptIdentity = isChildRequest
+            ? {
+                threadId: requestThreadId,
+                turnId: normalizeNonEmptyString(record.turnId),
+              }
+            : identity;
           if (
             questions &&
             !Object.keys(normalizeRecord(normalizeRecord(response).answers))
               .length &&
-            identity?.turnId
+            interruptIdentity?.turnId
           ) {
             // A timeout here must not fail the shared process under other
             // conversations' turns; retiring it is decided below.
@@ -2648,8 +2665,8 @@ function registerNativeApprovalRequestHandlers(params: {
               await params.proc.sendRequest(
                 "turn/interrupt",
                 {
-                  threadId: identity.threadId,
-                  turnId: identity.turnId,
+                  threadId: interruptIdentity.threadId,
+                  turnId: interruptIdentity.turnId,
                 },
                 undefined,
                 { failProcessOnTimeout: false },
@@ -3097,6 +3114,7 @@ export async function runCodexAppServerNativeTurn(input: {
       const hostReceipts: import("../agent/contracts/types").AgentActionReceipt[] =
         [];
       let activeTurnIdentity: { threadId: string; turnId?: string } | undefined;
+      const childThreadIds = new Set<string>();
       let turnStarted = Promise.resolve();
       let resolveTurnStarted: () => void = () => {};
       const unregisterApprovalHandlers = registerNativeApprovalRequestHandlers({
@@ -3144,6 +3162,7 @@ export async function runCodexAppServerNativeTurn(input: {
           return activeTurnIdentity;
         },
         getActiveThreadId: () => activeTurnIdentity?.threadId,
+        childThreadIds,
       });
       const mcpEnabled = isCodexZoteroMcpToolsEnabled();
       const profileSignature =
@@ -3389,6 +3408,7 @@ export async function runCodexAppServerNativeTurn(input: {
             text = await waitForCodexAppServerTurnCompletion({
               proc,
               threadId: args.thread.threadId,
+              childThreadIds,
               startTurn: async () => {
                 const turnResult = await proc.sendRequest("turn/start", {
                   threadId: args.thread.threadId,

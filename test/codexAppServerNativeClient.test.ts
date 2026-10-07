@@ -4125,6 +4125,80 @@ describe("Codex native turns of two conversations on one process", function () {
     assert.equal(retired, 1);
   });
 
+  it("rejects unknown children and stale parent turns without asking for approval", async function () {
+    const writes: Array<Record<string, any>> = [];
+    const proc = createRoutingProcess(writes);
+    const asked: unknown[] = [];
+    registerNativeApprovalRequestHandlersForTests({
+      proc,
+      childThreadIds: new Set(["child-A"]),
+      getActiveThreadId: () => "thread-A",
+      getTurnIdentity: async () => ({ threadId: "thread-A", turnId: "turn-A" }),
+      onApprovalRequest: async (request) => {
+        asked.push(request);
+        return { decision: "accept" };
+      },
+    });
+    proc.handleMessage({
+      id: "unknown-child",
+      method: "item/commandExecution/requestApproval",
+      params: { threadId: "child-B", turnId: "turn-child-B", itemId: "cmd" },
+    });
+    proc.handleMessage({
+      id: "stale-parent",
+      method: "item/fileChange/requestApproval",
+      params: { threadId: "thread-A", turnId: "old-turn-A", itemId: "patch" },
+    });
+    await tick();
+    assert.isEmpty(asked);
+    assert.include(
+      writes.find((message) => message.id === "unknown-child")?.error.message,
+      "No handler accepted",
+    );
+    assert.equal(
+      writes.find((message) => message.id === "stale-parent")?.error.message,
+      "Stale native request",
+    );
+    proc.destroy();
+  });
+
+  it("interrupts the child turn when its question is unanswered", async function () {
+    const writes: Array<Record<string, any>> = [];
+    const proc = createRoutingProcess(writes);
+    registerNativeApprovalRequestHandlersForTests({
+      proc,
+      childThreadIds: new Set(["child-A"]),
+      getActiveThreadId: () => "thread-A",
+      getTurnIdentity: async () => ({ threadId: "thread-A", turnId: "turn-A" }),
+      onApprovalRequest: async () => ({ answers: {} }),
+    });
+    proc.handleMessage({
+      id: "child-question",
+      method: "item/tool/requestUserInput",
+      params: {
+        threadId: "child-A",
+        turnId: "child-turn-A",
+        itemId: "question",
+        questions: [{ id: "q1", question: "Which?", header: "Pick" }],
+      },
+    });
+    await tick();
+    const interrupt = writes.find(
+      (message) => message.method === "turn/interrupt",
+    );
+    assert.deepEqual(interrupt?.params, {
+      threadId: "child-A",
+      turnId: "child-turn-A",
+    });
+    proc.handleMessage({ id: interrupt!.id, result: {} });
+    await tick();
+    assert.deepEqual(
+      writes.find((message) => message.id === "child-question")?.result,
+      { answers: {} },
+    );
+    proc.destroy();
+  });
+
   it("keeps another conversation's pending approval when one turn ends", async function () {
     const writes: Array<Record<string, any>> = [];
     const proc = createRoutingProcess(writes);
@@ -4138,6 +4212,7 @@ describe("Codex native turns of two conversations on one process", function () {
         },
         getTurnIdentity: async () => ({ threadId, turnId: `turn-${threadId}` }),
         getActiveThreadId: () => threadId,
+        childThreadIds: new Set([`child-${threadId}`]),
       });
     const disposeA = register("thread-A");
     register("thread-B");
@@ -4145,7 +4220,11 @@ describe("Codex native turns of two conversations on one process", function () {
       proc.handleMessage({
         id: `question-${threadId}`,
         method: "item/fileChange/requestApproval",
-        params: { threadId, turnId: `turn-${threadId}`, itemId: threadId },
+        params: {
+          threadId: `child-${threadId}`,
+          turnId: `child-turn-${threadId}`,
+          itemId: threadId,
+        },
       });
     }
     await tick();
@@ -4153,7 +4232,7 @@ describe("Codex native turns of two conversations on one process", function () {
     disposeA();
     assert.isTrue(signals["thread-A"]?.aborted);
     assert.isFalse(signals["thread-B"]?.aborted);
-    assert.isTrue(proc.hasPendingUserInput("thread-B"));
+    assert.isTrue(proc.hasPendingUserInput("child-thread-B"));
     proc.destroy();
   });
 
@@ -4335,6 +4414,120 @@ describe("Codex native turns of two conversations on one process", function () {
     assert.equal(resultA.text, `answer ${resultA.turnId}`);
     assert.equal(resultB.text, `answer ${resultB.turnId}`);
   });
+
+  for (const { method, activityType } of [
+    "item/commandExecution/requestApproval",
+    "item/fileChange/requestApproval",
+    "execCommandApproval",
+    "applyPatchApproval",
+  ].flatMap((method) =>
+    ["collabAgentToolCall", "subAgentActivity"].map((activityType) => ({
+      method,
+      activityType,
+    })),
+  )) {
+    it(`routes a tracked sub-agent's ${method} from ${activityType} to its owning conversation`, async function () {
+      const requests: Array<{ method: string; params: Record<string, any> }> =
+        [];
+      const responses: Array<Record<string, any>> = [];
+      const asked: string[] = [];
+      const turns = new Map<
+        string,
+        {
+          threadId: string;
+          turnId: string;
+          emit: (message: Record<string, unknown>) => void;
+        }
+      >();
+      const results = await runTwoConversations({
+        requests,
+        onTurn: ({ threadId, turnId, emit }) => {
+          const childThreadId = `child-${threadId}`;
+          turns.set(childThreadId, { threadId, turnId, emit });
+          emit({
+            method: "item/started",
+            params: {
+              threadId,
+              turnId,
+              item: {
+                id: `spawn-${threadId}`,
+                type: activityType,
+                ...(activityType === "subAgentActivity"
+                  ? {
+                      agentThreadId: childThreadId,
+                      agentPath: "/root/approval-test",
+                      kind: "started",
+                    }
+                  : { receiverThreadIds: [childThreadId] }),
+              },
+            },
+          });
+          emit({
+            id: childThreadId,
+            method,
+            params: {
+              ...(method.endsWith("/requestApproval")
+                ? { threadId: childThreadId }
+                : { conversationId: childThreadId }),
+              turnId: `child-turn-${turnId}`,
+              itemId: `effect-${childThreadId}`,
+              command: "ls",
+              changes: { "/repo/example/notes.md": { kind: "update" } },
+            },
+          });
+        },
+        onServerResponse: (message) => {
+          const turn = turns.get(message.id);
+          if (!turn) return;
+          responses.push(message);
+          turn.emit({
+            method: "turn/completed",
+            params: {
+              threadId: turn.threadId,
+              turn: { id: turn.turnId, status: "completed" },
+            },
+          });
+        },
+        runA: (run) =>
+          run({
+            onApprovalRequest: async (request) => {
+              const params = request.params as any;
+              asked.push(`A:${params.threadId || params.conversationId}`);
+              return { decision: "accept" };
+            },
+          }),
+        runB: (run) =>
+          run({
+            onApprovalRequest: async (request) => {
+              const params = request.params as any;
+              asked.push(`B:${params.threadId || params.conversationId}`);
+              return { decision: "decline" };
+            },
+          }),
+      });
+      assert.deepEqual(
+        results.map((result) => result.status),
+        ["fulfilled", "fulfilled"],
+      );
+      const [resultA, resultB] = results.map(
+        (result) => (result as PromiseFulfilledResult<any>).value,
+      );
+      assert.sameMembers(asked, [
+        `A:child-${resultA.threadId}`,
+        `B:child-${resultB.threadId}`,
+      ]);
+      assert.deepEqual(
+        responses.find((message) => message.id === `child-${resultA.threadId}`)
+          ?.result,
+        { decision: "accept" },
+      );
+      assert.deepEqual(
+        responses.find((message) => message.id === `child-${resultB.threadId}`)
+          ?.result,
+        { decision: "decline" },
+      );
+    });
+  }
 
   it("stops one conversation without stopping the other", async function () {
     const requests: Array<{ method: string; params: Record<string, any> }> = [];

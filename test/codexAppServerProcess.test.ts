@@ -1058,6 +1058,85 @@ describe("codexAppServerProcess", function () {
       assert.equal(await turnA, "done");
     });
 
+    it("keeps the parent alive while a tracked child waits for approval", async function () {
+      const proc = createConcurrentProcess({ userAgent: CURRENT_USER_AGENT });
+      const childThreadIds = new Set<string>();
+      let approve!: (value: unknown) => void;
+      const dispose = proc.onRequest(
+        "item/commandExecution/requestApproval",
+        () =>
+          new Promise((resolve) => {
+            approve = resolve;
+          }),
+      );
+      let settled = false;
+      const result = waitForCodexAppServerTurnCompletion({
+        proc,
+        threadId: "thread-A",
+        turnId: "turn-A",
+        childThreadIds,
+        timeoutMs: 30,
+      }).then(
+        (text) => {
+          settled = true;
+          return text;
+        },
+        (error) => {
+          settled = true;
+          return error;
+        },
+      );
+      try {
+        proc.handleMessage({
+          method: "item/started",
+          params: {
+            threadId: "thread-A",
+            turnId: "turn-A",
+            item: {
+              id: "spawn-1",
+              type: "subAgentActivity",
+              agentThreadId: "child-A",
+              agentPath: "/root/approval-test",
+              kind: "started",
+            },
+          },
+        });
+        proc.handleMessage({
+          id: "child-approval",
+          method: "item/commandExecution/requestApproval",
+          params: {
+            threadId: "child-A",
+            turnId: "child-turn-A",
+            itemId: "cmd",
+          },
+        });
+        await new Promise((resolve) => setTimeout(resolve, 100));
+        assert.isTrue(childThreadIds.has("child-A"));
+        assert.isTrue(proc.hasPendingUserInput("child-A"));
+        assert.isFalse(
+          settled,
+          "the parent must wait for its child's decision",
+        );
+        approve({ decision: "accept" });
+        await tick();
+        proc.handleMessage({
+          method: "turn/completed",
+          params: {
+            threadId: "thread-A",
+            turn: { id: "turn-A", status: "completed" },
+          },
+        });
+        assert.equal(await result, "");
+        assert.isEmpty(
+          [...childThreadIds],
+          "completed turns release their tracked children",
+        );
+      } finally {
+        dispose();
+        proc.destroy();
+      }
+    });
+
     it("still destroys the process when a lone turn times out", async function () {
       let killed = false;
       const proc = createConcurrentProcess({
