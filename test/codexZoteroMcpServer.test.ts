@@ -171,7 +171,10 @@ describe("Zotero MCP server", function () {
       getActiveZoteroPane: () =>
         selectedLibraryID
           ? {
-              getSelectedLibraryID: () => selectedLibraryID,
+              getSelectedLibraryIDs: () => [selectedLibraryID],
+              getSelectedLibraryID: () => {
+                throw new Error("getSelectedLibraryID was removed");
+              },
               getSelectedItems: () => [],
             }
           : undefined,
