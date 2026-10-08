@@ -411,8 +411,6 @@ credentials or private library content.
 Anonymous quotas and permissions are server-controlled. An exhausted quota
 produces an error; the integration does not adopt credentials from responses,
 automatically retry, switch providers, or report fictional credit usage.
-See [AnySearch maintenance and validation notes](ANYSEARCH.md) for the
-supported contract, tests, limitations and outstanding live acceptance checks.
 
 ## Codex Setup (ChatGPT Plus Subscribers)
 
