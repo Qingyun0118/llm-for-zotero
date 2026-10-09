@@ -6,7 +6,7 @@ import type {
 } from "./types";
 
 export const MODEL_CAPABILITY_REGISTRY_URL =
-  "https://raw.githubusercontent.com/yilewang/llm-for-zotero/main/registry/model-capabilities.v1.json";
+  "https://raw.githubusercontent.com/Qingyun0118/llm-for-zotero/main/registry/model-capabilities.v1.json";
 export const MODEL_CAPABILITY_REGISTRY_MAX_BYTES = 512 * 1024;
 export const MODEL_CAPABILITY_MAX_TOKEN_LIMIT = 100_000_000;
 

@@ -72,6 +72,16 @@ describe("workflow: standalone responsive chrome", function () {
         "#llm-header-runtime-controls",
       ) as HTMLElement;
       runtimeWrapper.style.display = "";
+      // The standalone panel hides Pop out. This cloned fixture exercises the
+      // embedded header, including the newer Task progress action control.
+      for (const button of Array.from(
+        header.querySelectorAll<HTMLButtonElement>(
+          ".llm-header-actions button",
+        ),
+      )) {
+        button.hidden = false;
+        button.style.display = "inline-flex";
+      }
       for (const label of ["Paper chat", "Note chat", "Web chat"]) {
         paperTabLabel.textContent = label;
         for (const scale of [0.8, 1.2, 1.8]) {
@@ -135,7 +145,7 @@ describe("workflow: standalone responsive chrome", function () {
             );
             assert.lengthOf(
               buttons,
-              10,
+              11,
               `All header controls visible: ${context}`,
             );
             const toggleRowRect = toggleRow.getBoundingClientRect();

@@ -822,8 +822,8 @@ const zhCN: Record<string, string> = {
     "预设使用 Moonshot 国际版 API。中国大陆可使用 api.moonshot.cn。",
   "Uses GitHub Copilot via device login. Requires an active Copilot subscription.":
     "通过设备登录使用 GitHub Copilot。需要有效的 Copilot 订阅。",
-  'Relay questions to %targets% via the Sync for Zotero browser extension. Download extension: github.com/yilewang/sync-for-zotero → Releases. Unzip, open chrome://extensions, enable Developer Mode, click "Load unpacked", select the extension folder. Keep the corresponding chat tab open while using WebChat mode.':
-    "通过 Sync for Zotero 浏览器扩展将问题转发到 %targets%。下载扩展：github.com/yilewang/sync-for-zotero → Releases。解压后打开 chrome://extensions，启用开发者模式，点击“加载已解压的扩展程序”，选择扩展文件夹。使用 WebChat 模式时保持对应聊天标签页打开。",
+  'Relay questions to %targets% via the Sync for Zotero browser extension. Download extension: github.com/Qingyun0118/sync-for-zotero → Releases. Unzip, open chrome://extensions, enable Developer Mode, click "Load unpacked", select the extension folder. Keep the corresponding chat tab open while using WebChat mode.':
+    "通过 Sync for Zotero 浏览器扩展将问题转发到 %targets%。下载扩展：github.com/Qingyun0118/sync-for-zotero → Releases。解压后打开 chrome://extensions，启用开发者模式，点击“加载已解压的扩展程序”，选择扩展文件夹。使用 WebChat 模式时保持对应聊天标签页打开。",
 
   // Static preference controls
   "Plugin Font Size": "插件字体大小",

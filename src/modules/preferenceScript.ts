@@ -1734,7 +1734,7 @@ export async function registerPrefsScripts(_window: Window | undefined | null) {
       const authModeHelperText =
         group.authMode === "webchat"
           ? t(
-              'Relay questions to %targets% via the Sync for Zotero browser extension. Download extension: github.com/yilewang/sync-for-zotero → Releases. Unzip, open chrome://extensions, enable Developer Mode, click "Load unpacked", select the extension folder. Keep the corresponding chat tab open while using WebChat mode.',
+              'Relay questions to %targets% via the Sync for Zotero browser extension. Download extension: github.com/Qingyun0118/sync-for-zotero → Releases. Unzip, open chrome://extensions, enable Developer Mode, click "Load unpacked", select the extension folder. Keep the corresponding chat tab open while using WebChat mode.',
             ).replace(
               "%targets%",
               WEBCHAT_TARGETS.map((wt) => wt.label).join(" / "),

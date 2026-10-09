@@ -111,7 +111,7 @@ const OA_SELECT =
 const OA_MAILTO = "mailto=llm-for-zotero@github.com";
 const OA_BASE = "https://api.openalex.org";
 const USER_AGENT =
-  "llm-for-zotero/1.0 (https://github.com/yilewang/llm-for-zotero)";
+  "llm-for-zotero/1.0 (https://github.com/Qingyun0118/llm-for-zotero)";
 
 function normalizeString(value: unknown): string {
   return typeof value === "string" ? value.trim() : "";

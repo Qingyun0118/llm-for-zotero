@@ -11,6 +11,8 @@ AnySearch, citation and retry fixes retained.
 - Preserve portable SVG and image answers through the browser companion.
 - Move plugin updates and downloads to Qingyun0118/llm-for-zotero. Keep the
   existing plugin ID, preferences and data locations for an in-place upgrade.
+- Fetch model capability metadata from this fork and point the settings panel's
+  browser-companion download instructions at the maintained companion repository.
 - Require quality checks and verify packaged update URLs and hashes before
   publishing a release.
 - Keep sidebar mode tabs equally sized across Linux fonts, and allow CI graph
@@ -19,5 +21,7 @@ AnySearch, citation and retry fixes retained.
   package immediately before uploading it.
 - Collect all native workflow failures in each run and keep layout fixtures
   separate from asynchronous history refreshes.
+- Create and verify the version tag after the quality gate when publishing
+  from main, as required by the scaffold release CLI.
 
 Original project by Yile Wang and contributors; this fork retains its license.

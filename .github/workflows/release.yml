@@ -62,4 +62,15 @@ jobs:
             echo "v${version} already exists; bump the version for a new release."
             exit 1
           fi
+          # scaffold generates its changelog from the version tag even in CI.
+          # Main-branch publishing must create that tag before invoking it.
+          tag="v${version}"
+          if ! git rev-parse --verify "refs/tags/$tag" >/dev/null 2>&1; then
+            git tag "$tag"
+            git push origin "refs/tags/$tag"
+          fi
+          if [ "$(git rev-list -n 1 "$tag")" != "$(git rev-parse HEAD)" ]; then
+            echo "$tag points to a different commit; do not overwrite it."
+            exit 1
+          fi
           npm run release -- --yes
