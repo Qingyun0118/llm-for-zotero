@@ -27,7 +27,9 @@ export default defineConfig({
     "https://github.com/Qingyun0118/llm-for-zotero/releases/download/v{{version}}/{{xpiName}}.xpi",
 
   release: {
-    changelog: readFileSync("RELEASE_NOTES.md", "utf8"),
+    // scaffold treats a string changelog as a shell command; provide a reader.
+    changelog: () => readFileSync("RELEASE_NOTES.md", "utf8"),
+    bumpp: { execute: "npm run build && npm run verify:release" },
     github: { repository: "Qingyun0118/llm-for-zotero" },
   },
 

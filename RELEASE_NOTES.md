@@ -15,5 +15,7 @@ AnySearch, citation and retry fixes retained.
   publishing a release.
 - Keep sidebar mode tabs equally sized across Linux fonts, and allow CI graph
   checks and asynchronous MinerU tooltips to finish before test assertions.
+- Read release notes through the scaffold callback and verify the final rebuilt
+  package immediately before uploading it.
 
 Original project by Yile Wang and contributors; this fork retains its license.
