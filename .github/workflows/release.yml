@@ -69,8 +69,30 @@ jobs:
             git tag "$tag"
             git push origin "refs/tags/$tag"
           fi
-          if [ "$(git rev-list -n 1 "$tag")" != "$(git rev-parse HEAD)" ]; then
-            echo "$tag points to a different commit; do not overwrite it."
-            exit 1
+          tagged_commit=$(git rev-list -n 1 "$tag")
+          if [ "$tagged_commit" != "$(git rev-parse HEAD)" ]; then
+            # One-time recovery of the first unpublished fork tag: its complete
+            # quality gate passed, but bumpp failed before any upload. Preserve
+            # that exact commit and use a lease; published tags are never moved.
+            if [ "$tag" != "v3.9.12" ] || [ "$tagged_commit" != "8c19de5c584c995388b3d1edd9adc5bdd73bcb08" ]; then
+              echo "$tag points to a different commit; do not overwrite it."
+              exit 1
+            fi
+            releases=$(gh api "repos/$GITHUB_REPOSITORY/releases?per_page=100")
+            if echo "$releases" | jq -e --arg tag "$tag" 'any(.[]; .tag_name == $tag)' >/dev/null; then
+              echo "$tag has a release; never move a published version tag."
+              exit 1
+            fi
+            backup_tag="unpublished-v3.9.12-before-cli-fix"
+            if ! git rev-parse --verify "refs/tags/$backup_tag" >/dev/null 2>&1; then
+              git tag "$backup_tag" "$tagged_commit"
+            fi
+            if [ "$(git rev-list -n 1 "$backup_tag")" != "$tagged_commit" ]; then
+              echo "The recovery backup tag points to a different commit."
+              exit 1
+            fi
+            git push origin "refs/tags/$backup_tag"
+            git tag -f "$tag" HEAD
+            git push --force-with-lease="refs/tags/$tag:$tagged_commit" origin "refs/tags/$tag"
           fi
           npm run release -- --yes

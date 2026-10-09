@@ -25,3 +25,7 @@ AnySearch, citation and retry fixes retained.
   from main, as required by the scaffold release CLI.
 
 Original project by Yile Wang and contributors; this fork retains its license.
+
+- Pass one build command to bumpp; the build itself includes type and release
+  verification. Preserve a backup of the unpublished first tag when recovering
+  the failed initial publication, without moving any published release tag.

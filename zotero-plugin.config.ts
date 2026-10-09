@@ -29,7 +29,9 @@ export default defineConfig({
   release: {
     // scaffold treats a string changelog as a shell command; provide a reader.
     changelog: () => readFileSync("RELEASE_NOTES.md", "utf8"),
-    bumpp: { execute: "npm run build && npm run verify:release" },
+    // bumpp executes a command directly; shell operators become npm arguments.
+    // build already includes typecheck and verify:release.
+    bumpp: { execute: "npm run build" },
     github: { repository: "Qingyun0118/llm-for-zotero" },
   },
 
