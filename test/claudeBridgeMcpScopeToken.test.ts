@@ -16,10 +16,14 @@ describe("Claude bridge MCP scope token", function () {
     Zotero?: Record<string, unknown>;
   };
   const originalZotero = globalScope.Zotero;
+  const originalFetch = globalThis.fetch;
   const conversationKey = CLAUDE_GLOBAL_CONVERSATION_KEY_BASE + 73;
   const otherConversationKey = CLAUDE_GLOBAL_CONVERSATION_KEY_BASE + 74;
 
   beforeEach(function () {
+    // This unit test exercises local token invalidation, not a running bridge.
+    globalThis.fetch = async () =>
+      new Response(JSON.stringify({ ok: true }), { status: 200 });
     globalScope.Zotero = {
       Profile: { dir: "/tmp/lfz-claude-bridge-scope-profile" },
       Prefs: { get: () => "" },
@@ -31,6 +35,7 @@ describe("Claude bridge MCP scope token", function () {
     resetConversationWriteFenceForTests();
     resetClaudeBridgeRuntime();
     globalScope.Zotero = originalZotero;
+    globalThis.fetch = originalFetch;
   });
 
   it("keeps the bridge turn scope token stable for one conversation", function () {

@@ -1482,7 +1482,25 @@ export function openStandaloneChat(options?: {
               })();
             });
 
-            sidebarList.appendChild(row);
+            const titleActions = doc.createElementNS(
+              HTML_NS,
+              "div",
+            ) as HTMLDivElement;
+            titleActions.appendChild(row);
+            const { appendWebChatTitleActions } =
+              await import("./webChatTitleActions");
+            appendWebChatTitleActions({
+              doc,
+              container: titleActions,
+              session,
+              libraryID:
+                activeItem?.libraryID || Zotero.Libraries.userLibraryID,
+              updateTitle: (title, tooltip) => {
+                titleEl.textContent = title;
+                row.title = tooltip;
+              },
+            });
+            sidebarList.appendChild(titleActions);
           }
         } catch (err) {
           appLogger.warn("LLM: standalone webchat sidebar fetch failed", err);

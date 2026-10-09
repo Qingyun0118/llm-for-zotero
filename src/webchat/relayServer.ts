@@ -213,6 +213,7 @@ export interface RelayState {
 // Use Zotero object as shared namespace — guaranteed same across all contexts
 // in the plugin (globalThis may differ between sandbox scopes in Gecko)
 interface ExtensionStatus {
+  renameChatSupported?: boolean;
   chatTabAlive: boolean;
   chatUrl: string | null;
   siteId: string | null;
@@ -1966,6 +1967,7 @@ const LoadChatEndpoint = createEndpoint(["POST"], (opts) => {
 const ExtensionStatusEndpoint = createEndpoint(["POST"], (opts) => {
   const body = parseBody(opts.data);
   _store().extensionStatus = {
+    renameChatSupported: body.renameChatSupported === true,
     chatTabAlive: !!body.chatTabAlive,
     chatUrl: (body.chatUrl as string) || null,
     siteId: readNullableString(body.siteId),
@@ -2006,6 +2008,31 @@ const ExtensionStatusEndpoint = createEndpoint(["POST"], (opts) => {
 // ---------------------------------------------------------------------------
 
 const ENDPOINTS: Record<string, ReturnType<typeof createEndpoint>> = {
+  [`${PREFIX}/poll_title`]: createEndpoint(["GET"], async () => {
+    if (
+      S().status === "pending" ||
+      S().status === "running" ||
+      S().pendingCommand
+    )
+      return jsonReply({ command: null });
+    const { claimConversationTitle } = await import("./conversationTitles");
+    const record = await claimConversationTitle(getMirroredHistory());
+    return jsonReply({
+      command: record ? { type: "RENAME_CHAT", ...record } : null,
+    });
+  }),
+  [`${PREFIX}/title_result`]: createEndpoint(["POST"], async (opts) => {
+    const body = parseBody(opts.data);
+    const { completeConversationTitle } = await import("./conversationTitles");
+    const ok = await completeConversationTitle({
+      chatUrl: String(body.chatUrl || ""),
+      operationId: String(body.operationId || ""),
+      status: String(body.status || ""),
+      title: String(body.title || ""),
+      error: String(body.error || ""),
+    });
+    return jsonReply({ ok });
+  }),
   [`${PREFIX}/heartbeat`]: HeartbeatEndpoint,
   [`${PREFIX}/extension_status`]: ExtensionStatusEndpoint,
   [`${PREFIX}/debug`]: DebugEndpoint,

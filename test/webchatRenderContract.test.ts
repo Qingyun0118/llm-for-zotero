@@ -13,6 +13,41 @@ import { renderAssistantMarkdownHtmlForChat } from "../src/modules/contextPanel/
  * sync-for-zotero repo.
  */
 describe("webchat markdown render contract", function () {
+  it("renders portable SVG diagrams and remote image query strings", function () {
+    const svg =
+      '<svg xmlns="http://www.w3.org/2000/svg"><text>USV</text></svg>';
+    const source = `data:image/svg+xml;base64,${Buffer.from(svg).toString("base64")}`;
+    const html = renderAssistantMarkdownHtmlForChat(
+      `![](<${source}>)\n\n![示意图](<https://example.com/image.png?a=1&b=2>)`,
+    );
+    assert.include(html, `src="${source}"`);
+    assert.include(html, 'src="https://example.com/image.png?a=1&amp;b=2"');
+    assert.notInclude(html, "&amp;amp;");
+    assert.equal((html.match(/<img /g) || []).length, 2);
+  });
+
+  it("preserves ASCII diagram alignment and blank rows from webchat fences", function () {
+    const diagram =
+      "      /\\\n     /  \\\n____/____\\____\n\n\n  AUV1\n    |\n    USV ------ AUV2";
+    const html = renderAssistantMarkdownHtmlForChat(
+      `尖峰：\n\n\`\`\`plaintext\n${diagram}\n\`\`\`\n\n之后。`,
+    );
+    assert.include(html, 'data-code-lang="plaintext"');
+    assert.include(html, diagram);
+    assert.match(html, /<pre[^>]*><code[^>]*>/);
+    assert.include(html, "<p>之后。</p>");
+  });
+
+  it("keeps embedded fences and math-like text inside the code block", function () {
+    const diagram = "```text\n  $x$ **bold** _line_ `tick`\n```";
+    const html = renderAssistantMarkdownHtmlForChat(
+      `\`\`\`\`text\n${diagram}\n\`\`\`\``,
+    );
+    assert.include(html, diagram);
+    assert.notInclude(html, 'class="math-inline"');
+    assert.notInclude(html, "<strong>bold</strong>");
+  });
+
   it("renders recovered display and inline math", function () {
     const html = renderAssistantMarkdownHtmlForChat(
       "时间变量 $t$ 表示系统演化的时刻。\n\n$$dS_t=\\mu_t S_t\\,dt+\\sigma_t S_t\\,dW_t$$",

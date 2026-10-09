@@ -1,5 +1,6 @@
 import { createElement } from "../../../../utils/domHelpers";
 import type { Message } from "../../types";
+import { appendWebChatTitleActions } from "../../webChatTitleActions";
 
 type WebChatHistorySession = {
   id: string;
@@ -241,6 +242,16 @@ export function createWebChatHistoryController(
       });
 
       row.appendChild(btn);
+      appendWebChatTitleActions({
+        doc,
+        container: row,
+        session,
+        libraryID: deps.getItem()?.libraryID || Zotero.Libraries.userLibraryID,
+        updateTitle: (title, tooltip) => {
+          titleDiv.textContent = title;
+          titleDiv.title = tooltip;
+        },
+      });
       rows.appendChild(row);
     }
 

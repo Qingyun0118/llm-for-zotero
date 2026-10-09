@@ -58,6 +58,14 @@ describe("code highlight memoization", function () {
     assert.equal(stats.misses, 1);
   });
 
+  it("does not reuse unindented markup for an indented diagram", function () {
+    const plain = renderMarkdown(fence("text", "x\n|"));
+    const indented = renderMarkdown(fence("text", "  x\n|"));
+    assert.include(plain, "<code>x\n|</code>");
+    assert.include(indented, "<code>  x\n|</code>");
+    assert.equal(__getCodeHighlightCacheStatsForTest().misses, 2);
+  });
+
   it("bounds the cache with LRU eviction", function () {
     const render = (index: number) =>
       renderMarkdown(fence("javascript", `const unique_${index} = ${index};`));

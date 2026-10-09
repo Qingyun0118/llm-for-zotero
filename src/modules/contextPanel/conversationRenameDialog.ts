@@ -8,6 +8,7 @@ export type ConversationRenameDialogOptions = {
   confirmLabel: string;
   cancelLabel: string;
   maxLength?: number;
+  maxCodePoints?: number;
 };
 
 let conversationRenameDialogCounter = 0;
@@ -100,7 +101,13 @@ export function showConversationRenameDialog(
       },
     ) as HTMLButtonElement;
 
+    let composing = false;
     const syncConfirmState = () => {
+      if (options.maxCodePoints && !composing) {
+        input.value = Array.from(input.value)
+          .slice(0, options.maxCodePoints)
+          .join("");
+      }
       confirmButton.disabled = !input.value.trim();
     };
     syncConfirmState();
@@ -134,6 +141,13 @@ export function showConversationRenameDialog(
 
     overlay.addEventListener("click", onOverlayClick);
     input.addEventListener("input", syncConfirmState);
+    input.addEventListener("compositionstart", () => {
+      composing = true;
+    });
+    input.addEventListener("compositionend", () => {
+      composing = false;
+      syncConfirmState();
+    });
     cancelButton.addEventListener("click", () => settle(null));
     form.addEventListener("submit", (event) => {
       event.preventDefault();

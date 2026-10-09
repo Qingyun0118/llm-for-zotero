@@ -1,3 +1,5 @@
+> **Qingyun 维护版**：包含文献会话标题同步与图像、字符图渲染修复。安装及后续合并上游请看 [维护说明](FORK_MAINTENANCE.md)。自动更新由本仓库发布。
+
 # llm-for-zotero: A Research Agent System for your Zotero Library
 
 [![zotero target version](https://img.shields.io/badge/Zotero-7-green?style=flat-square&logo=zotero&logoColor=CC2936)](https://www.zotero.org)
@@ -29,10 +31,10 @@ Documentation:
   <img src="./assets/demo.png" alt="Screenshot of the llm-for-zotero sidebar inside the Zotero PDF reader" width="1024" />
 </p>
 
-
 ## Demo Video
 
 How to do a library chat literature review with llm-for-zotero agent
+
 <div align="center">
   <video
     src="https://github.com/user-attachments/assets/c3c80e9c-a8cd-487f-9b1c-49ff717f514c"
@@ -40,11 +42,6 @@ How to do a library chat literature review with llm-for-zotero agent
     controls>
   </video>
 </div>
-
-
-
-
-
 
 ## Table of Contents
 

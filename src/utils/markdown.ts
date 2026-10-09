@@ -496,7 +496,7 @@ function isMermaidFenceLanguage(lang: string): boolean {
 }
 
 /**
- * Syntax highlighting is a pure function of `(language, trimmed code)` but it is
+ * Syntax highlighting is a pure function of `(language, code)` but it is
  * one of the most expensive steps in rendering a chat message. The chat panel
  * re-renders whole messages often — switching conversations, reopening the
  * panel, and flipping a quote block to its verified/unverified state all rebuild
@@ -511,26 +511,26 @@ let codeHighlightCacheBytes = 0;
 let codeHighlightCacheHits = 0;
 let codeHighlightCacheMisses = 0;
 
-function computeCodeHtml(trimmedCode: string, lang: string): string {
+function computeCodeHtml(code: string, lang: string): string {
   const langClass = lang ? ` class="lang-${lang}"` : "";
   const highlightLanguage = highlightLanguageForFence(lang);
   if (!highlightLanguage) {
-    return `<pre${langClass}><code>${escapeHtml(trimmedCode)}</code></pre>`;
+    return `<pre${langClass}><code>${escapeHtml(code)}</code></pre>`;
   }
   try {
-    const highlighted = hljs.highlight(trimmedCode, {
+    const highlighted = hljs.highlight(code, {
       language: highlightLanguage,
       ignoreIllegals: true,
     }).value;
     return `<pre${langClass}><code class="hljs language-${highlightLanguage}">${highlighted}</code></pre>`;
   } catch {
-    return `<pre${langClass}><code>${escapeHtml(trimmedCode)}</code></pre>`;
+    return `<pre${langClass}><code>${escapeHtml(code)}</code></pre>`;
   }
 }
 
 function renderCodeHtml(code: string, lang: string): string {
-  const trimmedCode = code.trim();
-  const cacheKey = `${lang} ${trimmedCode}`;
+  // Leading indentation and blank rows carry meaning in plaintext diagrams.
+  const cacheKey = `${lang} ${code}`;
   const cached = codeHighlightCache.get(cacheKey);
   if (cached !== undefined) {
     // Refresh recency for LRU ordering.
@@ -540,7 +540,7 @@ function renderCodeHtml(code: string, lang: string): string {
     return cached;
   }
   codeHighlightCacheMisses += 1;
-  const html = computeCodeHtml(trimmedCode, lang);
+  const html = computeCodeHtml(code, lang);
   const estimatedBytes = (cacheKey.length + html.length) * 2;
   // Skip caching a single block that would blow the whole byte budget on its own.
   if (estimatedBytes <= CODE_HIGHLIGHT_CACHE_MAX_BYTES) {
@@ -1811,7 +1811,7 @@ function renderCodeBlock(code: string, raw: string): string {
   const label = lang || "text";
   if (zoteroNoteMode) {
     const langClass = lang ? ` class="lang-${lang}"` : "";
-    return `<pre${langClass}><code>${escapeHtml(code.trim())}</code></pre>`;
+    return `<pre${langClass}><code>${escapeHtml(code)}</code></pre>`;
   }
   const codeHtml = renderCodeHtml(code, lang);
 

@@ -1,7 +1,7 @@
 {
   "name": "llm-for-zotero",
   "type": "module",
-  "version": "3.9.11",
+  "version": "3.9.12",
   "description": "AI research agent rooted in your Zotero library",
   "config": {
     "addonName": "llm-for-zotero",
@@ -12,13 +12,13 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/yilewang/llm-for-zotero.git"
+    "url": "git+https://github.com/Qingyun0118/llm-for-zotero.git"
   },
   "author": "Yile Wang",
   "bugs": {
-    "url": "https://github.com/yilewang/llm-for-zotero/issues"
+    "url": "https://github.com/Qingyun0118/llm-for-zotero/issues"
   },
-  "homepage": "https://github.com/yilewang/llm-for-zotero#readme",
+  "homepage": "https://github.com/Qingyun0118/llm-for-zotero#readme",
   "license": "AGPL-3.0-or-later",
   "scripts": {
     "start": "zotero-plugin serve",
@@ -39,7 +39,8 @@
     "test:behavior:smoke": "node scripts/run-behavior-tests.mjs --tier smoke",
     "test:webchat:live": "node scripts/run-workflow-tests.mjs --webchat-live",
     "update-deps": "npm update --save",
-    "test:agent:live": "node scripts/run-workflow-tests.mjs --agent-live"
+    "test:agent:live": "node scripts/run-workflow-tests.mjs --agent-live",
+    "verify:release": "node scripts/verify-fork-release.mjs"
   },
   "dependencies": {
     "fflate": "^0.8.2",

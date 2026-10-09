@@ -1,4 +1,19 @@
 import { spawn } from "node:child_process";
+import { mkdir } from "node:fs/promises";
+import { createRequire } from "node:module";
+import { build } from "esbuild";
+
+// Use the locked Chai dependency. The scaffold's legacy CDN endpoint returns
+// HTTP 403, and CI must not depend on a second, unversioned test library.
+await mkdir(".scaffold/cache", { recursive: true });
+await build({
+  entryPoints: [createRequire(import.meta.url).resolve("chai")],
+  bundle: true,
+  platform: "browser",
+  format: "iife",
+  globalName: "chai",
+  outfile: ".scaffold/cache/chai.js",
+});
 
 const command = process.platform === "win32" ? "npx.cmd" : "npx";
 const args = ["zotero-plugin", "test", "--no-watch", "--abort-on-fail"];

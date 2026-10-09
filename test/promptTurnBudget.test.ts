@@ -24,11 +24,13 @@ import {
  * saying that its metadata mode proposes changes for the user to approve, so
  * a review never asks to change an item it only reads, and that it searches
  * outside the library only on request (324 tool characters, 2026-10-03).
+ * The unmodified v3.9.11 baseline adds 12 characters to global/collection
+ * turns; measured on ca6aaf58 before migrating this fork's features.
  */
 const TURN_BUDGETS: Record<string, number> = {
-  global: 35_474,
+  global: 35_486,
   paper: 34_764,
-  collection: 35_572,
+  collection: 35_584,
 };
 
 const TURNS: Record<string, Record<string, unknown>> = {

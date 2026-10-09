@@ -1,4 +1,5 @@
 import { cp } from "node:fs/promises";
+import { readFileSync } from "node:fs";
 import { defineConfig } from "zotero-plugin-scaffold";
 import pkg from "./package.json";
 import { patchGeneratedWorkflowTestReporter } from "./scripts/workflow-test-reporter.mjs";
@@ -19,11 +20,20 @@ export default defineConfig({
   name: pkg.config.addonName,
   id: pkg.config.addonID,
   namespace: pkg.config.addonRef,
-  updateURL: `https://github.com/{{owner}}/{{repo}}/releases/download/release/${
+  updateURL: `https://github.com/Qingyun0118/llm-for-zotero/releases/download/release/${
     pkg.version.includes("-") ? "update-beta.json" : "update.json"
   }`,
   xpiDownloadLink:
-    "https://github.com/{{owner}}/{{repo}}/releases/download/v{{version}}/{{xpiName}}.xpi",
+    "https://github.com/Qingyun0118/llm-for-zotero/releases/download/v{{version}}/{{xpiName}}.xpi",
+
+  release: {
+    changelog: readFileSync("RELEASE_NOTES.md", "utf8"),
+    github: { repository: "Qingyun0118/llm-for-zotero" },
+  },
+
+  // scaffold 0.8.2 passes a bare "no-remote" argument. Supply the actual
+  // Firefox flag so tests and development cannot attach to the user's instance.
+  server: { startArgs: ["-no-remote"] },
 
   build: {
     assets: ["addon/**/*.*"],

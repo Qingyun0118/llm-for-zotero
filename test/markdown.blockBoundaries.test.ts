@@ -828,6 +828,20 @@ describe("renderMarkdown with inline block tokens", function () {
 });
 
 describe("renderMarkdown code block presentation", function () {
+  it("preserves diagram whitespace in chat, notes and the fallback renderer", function () {
+    const diagram = "    /\\\n   /  \\\n\n\n  /____\\  ";
+    const input = `\`\`\`text\n${diagram}\n\`\`\``;
+    assert.include(renderMarkdown(input), `<code>${diagram}</code>`);
+    assert.include(renderMarkdownForNote(input), `<code>${diagram}</code>`);
+    __setMarkdownParserDisabledForTest(true);
+    try {
+      assert.include(renderMarkdown(input), `<code>${diagram}`);
+      assert.include(renderMarkdownForNote(input), `<code>${diagram}`);
+    } finally {
+      __setMarkdownParserDisabledForTest(false);
+    }
+  });
+
   it("renders normal fenced code as escaped code inside the polished shell", function () {
     const input = "```ts\nconst label = '<svg>';\n```";
     const html = renderMarkdown(input);

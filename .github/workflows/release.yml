@@ -2,17 +2,34 @@ name: Release Plugin
 
 on:
   push:
+    branches:
+      - main
     tags:
       - "v*"
+    paths:
+      - package.json
+      - RELEASE_NOTES.md
+  workflow_dispatch:
 
 permissions:
   contents: write
 
+env:
+  NPM_CONFIG_ALLOW_GIT: all
+  GIT_CONFIG_COUNT: "1"
+  GIT_CONFIG_KEY_0: url.https://github.com/.insteadOf
+  GIT_CONFIG_VALUE_0: ssh://git@github.com/
+
+concurrency:
+  group: publish-plugin
+  cancel-in-progress: false
+
 jobs:
-  # No test gate here on purpose. Tests run on every push to main via ci.yml,
-  # which is where a red suite should be noticed and fixed. Publishing must not
-  # be blocked by them -- a flaky test is not a reason a release cannot ship.
+  quality:
+    uses: ./.github/workflows/quality.yml
+
   release:
+    needs: quality
     runs-on: ubuntu-latest
 
     steps:
@@ -33,7 +50,16 @@ jobs:
       - name: Build
         run: npm run build
 
+      - name: Verify fork update channel and asset hash
+        run: npm run verify:release
+
       - name: Publish release assets
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: npm run release -- --yes
+        run: |
+          version=$(node -p 'JSON.parse(require("fs").readFileSync("package.json", "utf8")).version')
+          if gh release view "v${version}" >/dev/null 2>&1; then
+            echo "v${version} already exists; bump the version for a new release."
+            exit 1
+          fi
+          npm run release -- --yes

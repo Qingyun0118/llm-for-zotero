@@ -8,6 +8,12 @@
  */
 
 import { appLogger } from "../core/logging";
+import {
+  canonicalTitleChatUrl,
+  snapshotTitlePaper,
+  queueConversationTitle,
+} from "./conversationTitles";
+import { relayGetStateSnapshot, relayGetChatHistory } from "./relayServer";
 import { readLocalFileBytes } from "../utils/llmClient";
 import { isAbsoluteLocalPath } from "../utils/localPath";
 import type { PaperContextRef } from "../modules/contextPanel/types";
@@ -245,6 +251,27 @@ export async function sendWebChatQuestion(
   // chat, wait for the remote composer/transcript to settle before submitting.
   await waitForRemoteReadyIfNavigating(host, signal);
 
+  // Snapshot before dispatch: the user may change papers while an answer streams.
+  let titlePaper: ReturnType<typeof snapshotTitlePaper> = null;
+  try {
+    titlePaper =
+      pdfPaperContexts?.length === 1
+        ? snapshotTitlePaper(
+            Zotero.Items.get(pdfPaperContexts[0].contextItemId),
+          )
+        : !pdfPaperContexts?.length
+          ? snapshotTitlePaper(opts.item)
+          : null;
+  } catch (error) {
+    appLogger.warn("[webchat] Could not read paper title", error);
+  }
+  const newTitleEligible =
+    (target || "chatgpt") === "chatgpt" &&
+    (forceNewChat === true ||
+      (!expectedChatUrl &&
+        !expectedChatId &&
+        !canonicalTitleChatUrl(relayGetStateSnapshot().remote_chat_url || "")));
+
   // --- Submit to the embedded relay ---
   const { seq } = await submitQuery(
     host,
@@ -261,11 +288,33 @@ export async function sendWebChatQuestion(
   );
 
   // --- Poll for streaming response ---
-  return pollForResponse(
+  const answer = await pollForResponse(
     host,
     seq,
     onAnswerSnapshot,
     onThinkingSnapshot,
     signal,
   );
+  if (
+    newTitleEligible &&
+    titlePaper &&
+    !signal?.aborted &&
+    answer.baselineTranscriptCount === 0 &&
+    answer.runState === "done" &&
+    answer.remoteChatUrl
+  ) {
+    try {
+      await queueConversationTitle({
+        chatUrl: answer.remoteChatUrl,
+        paper: titlePaper,
+        automatic: true,
+        expectedTitle:
+          relayGetChatHistory().find((s) => s.id === answer.remoteChatId)
+            ?.title || "",
+      });
+    } catch (error) {
+      appLogger.warn("[webchat] Could not queue paper title", error);
+    }
+  }
+  return answer;
 }
