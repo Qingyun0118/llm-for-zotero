@@ -83,15 +83,14 @@ jobs:
               echo "$tag has a release; never move a published version tag."
               exit 1
             fi
-            backup_tag="unpublished-v3.9.12-before-cli-fix"
-            if ! git rev-parse --verify "refs/tags/$backup_tag" >/dev/null 2>&1; then
-              git tag "$backup_tag" "$tagged_commit"
-            fi
-            if [ "$(git rev-list -n 1 "$backup_tag")" != "$tagged_commit" ]; then
-              echo "The recovery backup tag points to a different commit."
+            # The authenticated owner created this recovery branch. Actions
+            # cannot create an old-workflow tag without workflows permission.
+            backup_branch="backup/unpublished-v3.9.12-before-cli-fix"
+            backup_commit=$(git ls-remote origin "refs/heads/$backup_branch" | awk '{print $1}')
+            if [ "$backup_commit" != "$tagged_commit" ]; then
+              echo "The recovery backup branch is missing or points elsewhere."
               exit 1
             fi
-            git push origin "refs/tags/$backup_tag"
             git tag -f "$tag" HEAD
             git push --force-with-lease="refs/tags/$tag:$tagged_commit" origin "refs/tags/$tag"
           fi
