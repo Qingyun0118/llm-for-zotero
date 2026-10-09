@@ -17,5 +17,7 @@ AnySearch, citation and retry fixes retained.
   checks and asynchronous MinerU tooltips to finish before test assertions.
 - Read release notes through the scaffold callback and verify the final rebuilt
   package immediately before uploading it.
+- Collect all native workflow failures in each run and keep layout fixtures
+  separate from asynchronous history refreshes.
 
 Original project by Yile Wang and contributors; this fork retains its license.

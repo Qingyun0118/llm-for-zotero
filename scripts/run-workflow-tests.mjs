@@ -16,7 +16,7 @@ await build({
 });
 
 const command = process.platform === "win32" ? "npx.cmd" : "npx";
-const args = ["zotero-plugin", "test", "--no-watch", "--abort-on-fail"];
+const args = ["zotero-plugin", "test", "--no-watch"];
 const webChatLive = process.argv.includes("--webchat-live");
 const agentLive = process.argv.includes("--agent-live");
 

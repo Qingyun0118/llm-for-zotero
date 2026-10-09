@@ -88,7 +88,9 @@ export default defineConfig({
             : "test"),
     ...(workflowTestsEnabled
       ? {
-          abortOnFail: !agentLiveTestsEnabled,
+          // Collect every default workflow failure in one run. Live browser
+          // runs retain fail-fast behavior to avoid unnecessary remote turns.
+          abortOnFail: webChatLiveTestsEnabled && !agentLiveTestsEnabled,
           // A live agent turn does real model round trips and real library
           // writes, so it needs far longer than a UI workflow test.
           mocha: {

@@ -49,7 +49,12 @@ describe("workflow: question card readability", function () {
       const root = doc.querySelector<HTMLElement>(
         `[data-workflow-panel-id="${panel.panelId}"] .llm-panel`,
       )!;
-      root.querySelector(".llm-messages")!.appendChild(card);
+      // This synthetic pending card is not backed by the panel's chat history.
+      // Give it a real styled viewport that history hydration cannot clear.
+      const layoutHost = doc.createElement("div");
+      layoutHost.className = "llm-messages";
+      root.appendChild(layoutHost);
+      layoutHost.appendChild(card);
       const oldScale = root.style.getPropertyValue("--llm-font-scale");
       try {
         for (const [width, scale] of [
@@ -61,10 +66,12 @@ describe("workflow: question card readability", function () {
           card.style.maxWidth = "none";
           root.style.setProperty("--llm-font-scale", `${scale}`);
           await Zotero.Promise.delay(450);
+          assert.isTrue(card.isConnected, "the layout fixture stays mounted");
           for (const option of Array.from(
             card.querySelectorAll<HTMLElement>(".llm-planning-question-option"),
           ) as HTMLElement[]) {
             const bounds = option.getBoundingClientRect();
+            assert.isAbove(bounds.height, 0, "the choice is visible");
             const copy = option
               .querySelector<HTMLElement>(".llm-planning-question-option-copy")!
               .getBoundingClientRect();
@@ -143,6 +150,7 @@ describe("workflow: question card readability", function () {
           destination: { kind: "custom", text: "Learning / Other" },
         });
       } finally {
+        layoutHost.remove();
         if (oldScale) root.style.setProperty("--llm-font-scale", oldScale);
         else root.style.removeProperty("--llm-font-scale");
       }
