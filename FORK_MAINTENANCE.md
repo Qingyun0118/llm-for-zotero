@@ -38,9 +38,10 @@ npm run verify:release
 ```
 
 npm 12 若阻止锁定的 Git 类型依赖，安装命令加 `--allow-git=all`。
-通过检查后将合并分支合入 main，再推送到 origin，创建与 package.json
-版本一致的 `v版本号` 标签并推送到 origin。标签发布流程先运行质量检查，
-再上传 XPI 并更新固定清单。禁止向 upstream 推送。
+通过检查后将合并分支合入 main，再推送到 origin。默认 main 发布工作流
+会在全部质量门禁通过后自行创建与 package.json 版本一致的 `v版本号`
+标签、上传 XPI 并更新固定清单；不要再手动推送同一版本标签，以免重复
+触发发布。标签入口仍可单独使用。禁止向 upstream 推送。
 
 发布后下载 XPI 与更新清单，验证版本、插件 ID、地址及 SHA-512 一致。
 
