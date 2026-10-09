@@ -94,4 +94,9 @@ jobs:
             git tag -f "$tag" HEAD
             git push --force-with-lease="refs/tags/$tag:$tagged_commit" origin "refs/tags/$tag"
           fi
+          # First fork release needs an upstream history anchor; without it
+          # scaffold reads the entire history into Node's default 1 MiB buffer.
+          if ! git rev-parse --verify refs/tags/v3.9.11 >/dev/null 2>&1; then
+            git tag v3.9.11 ca6aaf58f559df9c165f3403522ebcf822b0629b
+          fi
           npm run release -- --yes

@@ -1,0 +1,83 @@
+name: Recover checked first release
+
+on:
+  push:
+    branches: [main]
+    paths: [.github/workflows/recover-first-release.yml]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  actions: read
+
+concurrency:
+  group: publish-plugin
+  cancel-in-progress: false
+
+env:
+  NPM_CONFIG_ALLOW_GIT: all
+  GIT_CONFIG_COUNT: "1"
+  GIT_CONFIG_KEY_0: url.https://github.com/.insteadOf
+  GIT_CONFIG_VALUE_0: ssh://git@github.com/
+
+jobs:
+  recover:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Verify all six quality gates for the exact release source
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh api repos/Qingyun0118/llm-for-zotero/actions/runs/37892745388 > run.json
+          gh api 'repos/Qingyun0118/llm-for-zotero/actions/runs/37892745388/jobs?per_page=100&filter=latest' > jobs.json
+          node <<'NODE'
+          const assert = require('node:assert/strict');
+          const fs = require('node:fs');
+          const run = JSON.parse(fs.readFileSync('run.json', 'utf8'));
+          const jobs = JSON.parse(fs.readFileSync('jobs.json', 'utf8')).jobs;
+          assert.equal(run.head_sha, 'e34d9ff1183e81ab57267bb7344d1f24e0245e0b');
+          assert.equal(run.status, 'completed');
+          assert.equal(run.path, '.github/workflows/release.yml');
+          for (const name of ['Lint', 'Typecheck', 'Unit tests', 'Workflow tests', 'Build', 'Full npm test gate']) {
+            assert(jobs.some(j => j.name === 'quality / ' + name && j.status === 'completed' && j.conclusion === 'success'), 'Missing successful gate: ' + name);
+          }
+          console.log('All six original gates passed for the immutable release source.');
+          NODE
+
+      - name: Checkout the exact checked source
+        uses: actions/checkout@v4
+        with:
+          ref: e34d9ff1183e81ab57267bb7344d1f24e0245e0b
+          fetch-depth: 0
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Verify version tag and add local upstream history anchor
+        run: |
+          test "$(git rev-parse HEAD)" = e34d9ff1183e81ab57267bb7344d1f24e0245e0b
+          test "$(git rev-list -n 1 v3.9.12)" = "$(git rev-parse HEAD)"
+          if ! git rev-parse --verify refs/tags/v3.9.11 >/dev/null 2>&1; then
+            git tag v3.9.11 ca6aaf58f559df9c165f3403522ebcf822b0629b
+          fi
+          test "$(git rev-list -n 1 v3.9.11)" = ca6aaf58f559df9c165f3403522ebcf822b0629b
+
+      - name: Build and verify XPI and update manifests
+        run: npm run build
+
+      - name: Publish the checked version, then update fixed manifests
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if gh release view v3.9.12 >/dev/null 2>&1; then
+            echo 'v3.9.12 already has a Release; never overwrite the published version.'
+            exit 1
+          fi
+          npm run release -- --yes
