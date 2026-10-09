@@ -18,6 +18,8 @@ function formatCycles(cycles: string[][]): string[] {
 }
 
 describe("import cycles", function () {
+  // The full repository graph can exceed Mocha's 2 s default on CI runners.
+  this.timeout(30000);
   it("does not introduce cycles outside the current allowlist", function () {
     const result = checkImportCycles(process.cwd());
     assert.deepEqual(formatCycles(result.unexpectedRuntime), []);

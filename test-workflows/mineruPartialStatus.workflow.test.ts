@@ -70,6 +70,14 @@ describe("workflow: MinerU Partial status", function () {
       for (const [k, v] of Object.entries(settings))
         Zotero.Prefs.set(prefix + k, v, true);
       win = await preferences(record.id, "partial");
+      // The checkpoint tooltip is populated asynchronously after the status
+      // dot. Wait for the saved-page details before asserting their contents.
+      await waitFor(() => {
+        const current = win!.document.querySelector(
+          `[data-parent-id="${record.id}"] [data-status="partial"]`,
+        ) as HTMLElement | null;
+        return Boolean(current?.title.includes("200/401"));
+      });
       const dot = win.document.querySelector(
         `[data-parent-id="${record.id}"] [data-status="partial"]`,
       ) as HTMLElement;

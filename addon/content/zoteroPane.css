@@ -637,6 +637,8 @@
  * to rise above, so header menus keep painting over it. */
 .llm-header-toggle-row .llm-header-mode-tabs {
   z-index: auto;
+  display: inline-grid;
+  grid-template-columns: repeat(2, minmax(64px, 1fr));
 }
 
 /* Balanced tabs: equal minimum widths, labels that shrink only when the

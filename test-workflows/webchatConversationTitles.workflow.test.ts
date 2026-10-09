@@ -1,5 +1,6 @@
 import { assert } from "chai";
 import type { WorkflowTestApi } from "../src/modules/contextPanel/workflowTestTypes";
+import { relayResetForTests } from "../src/webchat/relayServer";
 import {
   buildPaperConversationTitle,
   claimConversationTitle,
@@ -64,6 +65,9 @@ describe("workflow: literature conversation titles", function () {
 
   before(async function () {
     api = getWorkflowTestApi();
+    // A previous UI workflow may have left a navigation command in the relay.
+    // Title commands deliberately wait until the relay is idle.
+    relayResetForTests();
     fixture = await api.createPaperWithPdfFixture({
       title: paperTitle,
       pdfTitle: "Workflow literature title attachment",
@@ -78,6 +82,7 @@ describe("workflow: literature conversation titles", function () {
       await forget(chatUrl);
     if (fixture) await api.cleanupFixture(fixture);
     await api.reset();
+    relayResetForTests();
   });
 
   it("names a new conversation once the extension confirms the saved title", async function () {

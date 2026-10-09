@@ -13,5 +13,7 @@ AnySearch, citation and retry fixes retained.
   existing plugin ID, preferences and data locations for an in-place upgrade.
 - Require quality checks and verify packaged update URLs and hashes before
   publishing a release.
+- Keep sidebar mode tabs equally sized across Linux fonts, and allow CI graph
+  checks and asynchronous MinerU tooltips to finish before test assertions.
 
 Original project by Yile Wang and contributors; this fork retains its license.
