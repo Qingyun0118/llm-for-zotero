@@ -19,8 +19,8 @@ AnySearch, citation and retry fixes retained.
   checks and asynchronous MinerU tooltips to finish before test assertions.
 - Read release notes through the scaffold callback and verify the final rebuilt
   package immediately before uploading it.
-- Collect all native workflow failures in each run and keep layout fixtures
-  separate from asynchronous history refreshes.
+- Collect every native workflow failure and keep layout fixtures independent of
+  history refreshes, covering the upstream Task progress button.
 - Create and verify the version tag after the quality gate when publishing
   from main, as required by the scaffold release CLI.
 

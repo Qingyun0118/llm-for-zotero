@@ -75,10 +75,8 @@ describe("workflow: standalone responsive chrome", function () {
       // The standalone panel hides Pop out. This cloned fixture exercises the
       // embedded header, including the newer Task progress action control.
       for (const button of Array.from(
-        header.querySelectorAll<HTMLButtonElement>(
-          ".llm-header-actions button",
-        ),
-      )) {
+        header.querySelectorAll(".llm-header-actions button"),
+      ) as HTMLButtonElement[]) {
         button.hidden = false;
         button.style.display = "inline-flex";
       }
